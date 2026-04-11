@@ -506,16 +506,22 @@ def api_add_member(board_id):
     msg = (
         f"📋 <b>Вас добавили в доску «{board_name}»</b>\n\n"
         f"Пригласил: @{inviter}\n"
-        f"Теперь вы можете редактировать задачи на этой доске."
+        f"Теперь вы можете редактировать задачи на этой доске.\n\n"
+        f"🔗 <a href=\"{board_url}\">Открыть доску</a>"
     )
-    notify_telegram(
-        chat_id=member["telegram_id"],
-        text=msg,
-        reply_markup={
+    # Telegram rejects localhost URLs in inline keyboards,
+    # so use inline button only for real HTTPS domains
+    markup = None
+    if "localhost" not in WEB_URL and "127.0.0.1" not in WEB_URL:
+        markup = {
             "inline_keyboard": [[
                 {"text": "🔗 Открыть доску", "url": board_url}
             ]]
-        },
+        }
+    notify_telegram(
+        chat_id=member["telegram_id"],
+        text=msg,
+        reply_markup=markup,
     )
 
     return jsonify(member), 201
