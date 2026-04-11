@@ -80,7 +80,7 @@ DIGEST_HOUR=9
 | `BOT_TOKEN` | Token from BotFather (**required**) |
 | `FLASK_SECRET` | Random string for Flask session cookies |
 | `ADMIN_TOKEN` | Password to access the admin panel at `/admin?token=...` |
-| `WEB_URL` | Public URL of the web panel (used in bot's "Web panel" button) |
+| `WEB_URL` | Public URL of the web panel (used in bot links and invite notifications) |
 | `FLASK_DEBUG` | Set to `true` to enable `/dev-login` (development only) |
 | `PORT` | Port for the Flask web server |
 | `DIGEST_HOUR` | Hour (0-23, Moscow time) for the daily task digest |
@@ -121,7 +121,22 @@ For development, set `FLASK_DEBUG=true` in `.env` and visit `http://localhost:50
 
 ---
 
-## 9. Admin panel
+## 9. Board sharing
+
+Taskify supports two ways to share boards:
+
+**Public read-only link** -- toggle it in the Share modal. Anyone with the link can view the board without logging in.
+
+**Invite members by @username** -- type a Telegram username in the Share modal to grant edit access. The invited user:
+1. Must have sent `/start` to the bot at least once (so they exist in the database)
+2. Will receive a bot notification with a direct link to the board
+3. Will see the board in their sidebar under "Shared with me"
+
+> **Note:** On localhost, the invite link is sent as text in the message. On a production HTTPS domain, it appears as an inline button.
+
+---
+
+## 10. Admin panel
 
 Open in your browser:
 
@@ -238,6 +253,12 @@ After resetting the database, clear your browser cookies for `localhost:5000` (o
 **Deadlines seem off**
 - Deadlines are stored in local time. The scheduler runs in `Europe/Moscow` timezone.
 - Enter deadlines in `DD-MM-YYYY HH:MM` format in the bot.
+
+**Invite notification not received**
+- The invited user must have sent `/start` to the bot first
+- Check the Flask console for `notify_telegram FAILED` logs
+- On localhost, the link is sent as text (not an inline button) -- this is normal
+- Make sure `BOT_TOKEN` is set in `.env`
 
 **Port already in use**
 - Change `PORT` in `.env` or stop the other process using that port
