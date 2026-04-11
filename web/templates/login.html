@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="{{ lang }}">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Taskify — {{ 'Вход' if lang == 'ru' else 'Sign in' }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}"/>
+</head>
+<body class="auth-page">
+  <div class="auth-card">
+
+    <div class="auth-logo">
+      <svg class="auth-logo-icon" viewBox="0 0 42 42" fill="none">
+        <rect width="42" height="42" rx="12" fill="#5b6af0"/>
+        <rect x="8" y="10" width="10" height="22" rx="3" fill="white" opacity=".9"/>
+        <rect x="22" y="10" width="10" height="14" rx="3" fill="white" opacity=".6"/>
+      </svg>
+      <span class="auth-logo-text">Taskify</span>
+    </div>
+
+    <h1 class="auth-title">{{ 'Войдите через Telegram' if lang == 'ru' else 'Sign in via Telegram' }}</h1>
+    <p class="auth-sub">
+      {% if lang == 'ru' %}
+        Управляйте задачами в Telegram и на канбан-доске — синхронизировано в реальном времени.
+      {% else %}
+        Manage tasks in Telegram and on your kanban board — synced in real time.
+      {% endif %}
+    </p>
+
+    <div class="auth-steps">
+      <div class="auth-step">
+        <span class="auth-step-num">1</span>
+        <div>
+          {% if lang == 'ru' %}
+            Запустите бота <b>@taskifyjobs_bot</b> в Telegram
+          {% else %}
+            Start the bot <b>@taskifyjobs_bot</b> in Telegram
+          {% endif %}
+        </div>
+      </div>
+      <div class="auth-step">
+        <span class="auth-step-num">2</span>
+        <div>
+          {% if lang == 'ru' %}
+            Нажмите кнопку <b>🌐 Веб-панель</b>
+          {% else %}
+            Tap the <b>🌐 Web panel</b> button
+          {% endif %}
+        </div>
+      </div>
+      <div class="auth-step">
+        <span class="auth-step-num">3</span>
+        <div>
+          {% if lang == 'ru' %}
+            Нажмите на ссылку — вы войдёте автоматически
+          {% else %}
+            Click the link — you'll be logged in automatically
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {% if error %}
+    <div class="auth-error">{{ error }}</div>
+    {% endif %}
+
+    <div class="auth-lang">
+      <a href="{{ url_for('set_lang', lang='ru', next='/login') }}" class="lang-btn {% if lang == 'ru' %}active{% endif %}">RU</a>
+      <a href="{{ url_for('set_lang', lang='en', next='/login') }}" class="lang-btn {% if lang == 'en' %}active{% endif %}">EN</a>
+    </div>
+
+  </div>
+</body>
+</html>

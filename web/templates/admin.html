@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Taskify — Admin</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+<main class="main-content" style="margin-left: 0; max-width: 900px; margin: 0 auto; padding: 2rem;">
+  <h1 class="page-title">Admin Panel</h1>
+
+  <table class="admin-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Telegram ID</th>
+        <th>Username</th>
+        <th>Plan</th>
+        <th>Joined</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td>{{ u.id }}</td>
+        <td><code>{{ u.telegram_id }}</code></td>
+        <td>{{ u.username or '—' }}</td>
+        <td>
+          <span class="user-badge {% if u.plan == 'premium' %}premium{% endif %}">
+            {% if u.plan == 'premium' %}⭐ Premium{% else %}Free{% endif %}
+          </span>
+        </td>
+        <td>{{ u.created_at[:10] }}</td>
+        <td class="admin-actions">
+          {% if u.plan == 'free' %}
+          <a href="{{ url_for('admin_upgrade', user_id=u.id, token=admin_token) }}" class="btn-upgrade">Upgrade ⭐</a>
+          {% else %}
+          <a href="{{ url_for('admin_downgrade', user_id=u.id, token=admin_token) }}" class="btn-downgrade">Downgrade</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6">No users yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</main>
+</body>
+</html>
