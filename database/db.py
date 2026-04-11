@@ -327,11 +327,16 @@ def get_board_members(board_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def add_board_member(board_id: int, telegram_id: int) -> dict | None:
-    """Invite a user by Telegram ID. Returns member dict or None if user not found."""
+def add_board_member(board_id: int, username: str) -> dict | None:
+    """Invite a user by @username. Returns member dict or None if user not found."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
+    # strip leading @ if present
+    clean = username.lstrip("@").strip()
+    if not clean:
+        conn.close()
+        return None
+    cur.execute("SELECT id FROM users WHERE username = ? COLLATE NOCASE", (clean,))
     row = cur.fetchone()
     if not row:
         conn.close()
@@ -720,6 +725,32 @@ def get_stats(user_id: int) -> dict:
            WHERE t.user_id = ?
            GROUP BY c.key""",
         (user_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    result = {"todo": 0, "in_progress": 0, "done": 0, "total": 0}
+    for r in rows:
+        key = r["key"]
+        cnt = r["cnt"]
+        result["total"] += cnt
+        if key in result:
+            result[key] += cnt
+        else:
+            result[key] = cnt
+    return result
+
+
+def get_board_stats(board_id: int) -> dict:
+    """Returns task counts for a specific board, grouped by column.key."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT c.key, COUNT(t.id) as cnt
+           FROM tasks t
+           JOIN columns c ON t.column_id = c.id
+           WHERE t.board_id = ?
+           GROUP BY c.key""",
+        (board_id,),
     )
     rows = cur.fetchall()
     conn.close()

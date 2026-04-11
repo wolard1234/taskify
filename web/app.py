@@ -30,7 +30,7 @@ from database.db import (
     # tasks
     get_tasks_by_column, add_task, update_task, delete_task, get_task,
     # stats
-    get_stats,
+    get_board_stats,
 )
 
 load_dotenv()
@@ -155,7 +155,7 @@ def board():
         })
 
     tags = get_tags(user["id"])
-    stats = get_stats(user["id"])
+    stats = get_board_stats(active_board["id"])
     members = get_board_members(active_board["id"]) if is_owner else []
 
     return render_template(
@@ -417,6 +417,7 @@ def shared_board(token):
             "tasks": get_tasks_by_column(board_data["id"], col["id"]),
         })
     tags = get_tags(board_data["user_id"])
+    stats = get_board_stats(board_data["id"])
     return render_template(
         "board.html",
         user=None,
@@ -426,7 +427,7 @@ def shared_board(token):
         is_owner=False,
         columns=columns_data,
         tags=tags,
-        stats={"todo": 0, "in_progress": 0, "done": 0},
+        stats=stats,
         members=[],
         lang=lang,
         priority_labels=PRIORITY_LABELS,
@@ -449,18 +450,19 @@ def api_get_members(board_id):
 @app.route("/api/boards/<int:board_id>/members", methods=["POST"])
 @login_required
 def api_add_member(board_id):
-    """Invite user by Telegram ID. Body: { telegram_id: 123456 }"""
+    """Invite user by @username. Body: { username: "@nickname" }"""
     user = get_current_user()
     b = get_board(board_id, user["id"])
     if not b or b["user_id"] != user["id"]:
         return jsonify({"error": "Forbidden"}), 403
     data = request.get_json(silent=True) or {}
-    tg_id = data.get("telegram_id")
-    if not tg_id:
-        return jsonify({"error": "telegram_id required"}), 400
-    member = add_board_member(board_id, int(tg_id))
+    uname = (data.get("username") or "").strip()
+    if not uname:
+        return jsonify({"error": "username required"}), 400
+    member = add_board_member(board_id, uname)
     if not member:
-        return jsonify({"error": "User not found or already a member"}), 400
+        err_msg = "Пользователь не найден или уже участник" if "ru" in session.get("lang", "ru") else "User not found or already a member"
+        return jsonify({"error": err_msg}), 400
     return jsonify(member), 201
 
 

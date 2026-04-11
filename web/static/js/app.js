@@ -764,12 +764,12 @@ if (typeof IS_OWNER !== 'undefined' && IS_OWNER && !READONLY) {
 
   // invite member
   $('#invite-btn')?.addEventListener('click', async () => {
-    const input = $('#invite-tg-id');
-    const tgId = input.value.trim();
-    if (!tgId) return;
+    const input = $('#invite-username');
+    const username = input.value.trim();
+    if (!username) return;
     const res = await fetch(`/api/boards/${ACTIVE_BOARD_ID}/members`, {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ telegram_id: parseInt(tgId) }),
+      body: JSON.stringify({ username }),
     });
     if (!res.ok) {
       const err = await res.json();
@@ -781,7 +781,7 @@ if (typeof IS_OWNER !== 'undefined' && IS_OWNER && !READONLY) {
     const row = document.createElement('div');
     row.className = 'member-row';
     row.dataset.userId = member.user_id;
-    row.innerHTML = `<span class="member-name">${esc(member.username || 'User')} <span class="member-tg-id">(${member.telegram_id})</span></span><button class="btn-ghost btn-sm member-remove-btn" data-user-id="${member.user_id}">${LANG === 'ru' ? 'Удалить' : 'Remove'}</button>`;
+    row.innerHTML = `<span class="member-name">@${esc(member.username || 'user')}</span><button class="btn-ghost btn-sm member-remove-btn" data-user-id="${member.user_id}">${LANG === 'ru' ? 'Удалить' : 'Remove'}</button>`;
     membersList.appendChild(row);
     input.value = '';
     showToast(LANG === 'ru' ? 'Участник добавлен' : 'Member added', 'success');

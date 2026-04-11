@@ -428,17 +428,17 @@
       <!-- Members section -->
       <div class="share-section">
         <p class="share-section-title">{{ 'Участники (редактирование)' if lang == 'ru' else 'Members (edit access)' }}</p>
-        <p class="share-section-desc">{{ 'Пригласите пользователя по Telegram ID. Они должны сначала зайти в бота.' if lang == 'ru' else 'Invite user by Telegram ID. They must use the bot first.' }}</p>
+        <p class="share-section-desc">{{ 'Пригласите пользователя по @username. Они должны сначала зайти в бота.' if lang == 'ru' else 'Invite user by @username. They must use the bot first.' }}</p>
 
         <div class="share-invite-row">
-          <input type="number" class="form-input" id="invite-tg-id" placeholder="Telegram ID" style="flex:1"/>
+          <input type="text" class="form-input" id="invite-username" placeholder="@username" style="flex:1"/>
           <button class="btn-primary btn-sm" id="invite-btn">{{ 'Пригласить' if lang == 'ru' else 'Invite' }}</button>
         </div>
 
         <div class="members-list" id="members-list">
           {% for m in members %}
           <div class="member-row" data-user-id="{{ m.user_id }}">
-            <span class="member-name">{{ m.username or 'User' }} <span class="member-tg-id">({{ m.telegram_id }})</span></span>
+            <span class="member-name">@{{ m.username or 'user' }}</span>
             <button class="btn-ghost btn-sm member-remove-btn" data-user-id="{{ m.user_id }}">{{ 'Удалить' if lang == 'ru' else 'Remove' }}</button>
           </div>
           {% endfor %}
