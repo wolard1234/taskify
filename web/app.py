@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import logging
 from datetime import datetime
 from urllib.request import urlopen, Request
 from urllib.error import URLError
@@ -77,7 +78,8 @@ WEB_URL = os.getenv("WEB_URL", "http://localhost:5000").rstrip("/")
 
 def notify_telegram(chat_id: int, text: str, reply_markup: dict = None):
     """Send a Telegram message via Bot API (fire-and-forget)."""
-    if not BOT_TOKEN or not chat_id:
+    if not BOT_TOKEN or not chat_id or chat_id == 0:
+        logging.warning("notify_telegram skipped: no BOT_TOKEN or chat_id=%s", chat_id)
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
@@ -85,9 +87,16 @@ def notify_telegram(chat_id: int, text: str, reply_markup: dict = None):
         payload["reply_markup"] = json.dumps(reply_markup)
     try:
         req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-        urlopen(req, timeout=5)
-    except (URLError, OSError):
-        pass  # non-critical, don't break the invite flow
+        resp = urlopen(req, timeout=5)
+        logging.info("notify_telegram OK: chat_id=%s status=%s", chat_id, resp.status)
+    except Exception as e:
+        body = ""
+        if hasattr(e, "read"):
+            try:
+                body = e.read().decode()
+            except Exception:
+                pass
+        logging.error("notify_telegram FAILED: chat_id=%s error=%s body=%s", chat_id, e, body)
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
