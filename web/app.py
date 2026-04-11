@@ -17,10 +17,16 @@ from database.db import (
     # boards
     get_boards, get_board, add_board, update_board, delete_board,
     get_or_create_default_board,
+    # sharing
+    toggle_share_token, get_board_by_share_token,
+    get_board_members, add_board_member, remove_board_member,
+    get_boards_shared_with_user, user_can_edit_board,
     # columns
     get_columns, add_column, update_column, delete_column,
     # tags
     get_tags, add_tag, delete_tag,
+    # task-tags
+    set_task_tags,
     # tasks
     get_tasks_by_column, add_task, update_task, delete_task, get_task,
     # stats
@@ -127,13 +133,18 @@ def board():
     # resolve active board
     board_id = request.args.get("board_id", type=int) or session.get("active_board_id")
     boards = get_boards(user["id"])
-    if not boards:
+    shared_boards = get_boards_shared_with_user(user["id"])
+    all_boards = boards + shared_boards
+
+    if not all_boards:
         active_board = get_or_create_default_board(user["id"])
         boards = get_boards(user["id"])
+        all_boards = boards
     else:
-        active_board = next((b for b in boards if b["id"] == board_id), boards[0])
+        active_board = next((b for b in all_boards if b["id"] == board_id), all_boards[0])
 
     session["active_board_id"] = active_board["id"]
+    is_owner = active_board["user_id"] == user["id"]
 
     columns = get_columns(active_board["id"])
     columns_data = []
@@ -145,15 +156,19 @@ def board():
 
     tags = get_tags(user["id"])
     stats = get_stats(user["id"])
+    members = get_board_members(active_board["id"]) if is_owner else []
 
     return render_template(
         "board.html",
         user=user,
         boards=boards,
+        shared_boards=shared_boards,
         active_board=active_board,
+        is_owner=is_owner,
         columns=columns_data,
         tags=tags,
         stats=stats,
+        members=members,
         lang=lang,
         priority_labels=PRIORITY_LABELS,
         board_colors=BOARD_COLORS,
@@ -287,8 +302,10 @@ def api_add_task():
     if not board_id or not column_id:
         return jsonify({"error": "board_id and column_id required"}), 400
 
-    if not get_board(board_id, user["id"]):
-        return jsonify({"error": "Board not found"}), 404
+    if not user_can_edit_board(board_id, user["id"]):
+        return jsonify({"error": "Forbidden"}), 403
+
+    tag_ids = data.get("tag_ids") or []
 
     task = add_task(
         user_id=user["id"],
@@ -296,15 +313,10 @@ def api_add_task():
         column_id=column_id,
         title=title,
         description=(data.get("description") or "").strip(),
-        tag_id=data.get("tag_id") or None,
+        tag_ids=tag_ids,
         deadline=data.get("deadline") or None,
         priority=data.get("priority", "medium"),
     )
-    # attach tag info
-    tags = {t["id"]: t for t in get_tags(user["id"])}
-    if task.get("tag_id") and task["tag_id"] in tags:
-        task["tag_name"]  = tags[task["tag_id"]]["name"]
-        task["tag_color"] = tags[task["tag_id"]]["color"]
     return jsonify(task), 201
 
 
@@ -313,13 +325,22 @@ def api_add_task():
 def api_update_task(task_id):
     user = get_current_user()
     data = request.get_json(silent=True) or {}
-    allowed = {"title", "description", "column_id", "priority", "deadline", "tag_id"}
+    allowed = {"title", "description", "column_id", "priority", "deadline"}
     fields = {k: v for k, v in data.items() if k in allowed}
-    ok = update_task(task_id, user["id"], **fields)
-    if ok:
-        task = get_task(task_id, user["id"])
-        return jsonify(task)
-    return jsonify({"error": "Not found"}), 404
+
+    # handle tag_ids separately
+    if "tag_ids" in data:
+        set_task_tags(task_id, data["tag_ids"] or [])
+
+    if fields:
+        ok = update_task(task_id, user["id"], **fields)
+        if not ok:
+            return jsonify({"error": "Not found"}), 404
+
+    task = get_task(task_id, user["id"])
+    if not task:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(task)
 
 
 @app.route("/api/tasks/<int:task_id>", methods=["DELETE"])
@@ -359,6 +380,98 @@ def api_add_tag():
 def api_delete_tag(tag_id):
     user = get_current_user()
     ok = delete_tag(tag_id, user["id"])
+    if ok:
+        return jsonify({"ok": True})
+    return jsonify({"error": "Not found"}), 404
+
+
+# ── Sharing API ───────────────────────────────────────────────────────────────
+
+@app.route("/api/boards/<int:board_id>/share", methods=["POST"])
+@login_required
+def api_toggle_share(board_id):
+    """Toggle public share link on/off. Body: { enable: true/false }"""
+    user = get_current_user()
+    b = get_board(board_id, user["id"])
+    if not b or b["user_id"] != user["id"]:
+        return jsonify({"error": "Forbidden"}), 403
+    data = request.get_json(silent=True) or {}
+    enable = bool(data.get("enable", True))
+    token = toggle_share_token(board_id, user["id"], enable)
+    share_url = f"{request.host_url}shared/{token}" if token else None
+    return jsonify({"share_token": token, "share_url": share_url})
+
+
+@app.route("/shared/<token>")
+def shared_board(token):
+    """Public read-only board view."""
+    board_data = get_board_by_share_token(token)
+    if not board_data:
+        return "Board not found or sharing disabled.", 404
+    lang = session.get("lang", "ru")
+    columns = get_columns(board_data["id"])
+    columns_data = []
+    for col in columns:
+        columns_data.append({
+            **col,
+            "tasks": get_tasks_by_column(board_data["id"], col["id"]),
+        })
+    tags = get_tags(board_data["user_id"])
+    return render_template(
+        "board.html",
+        user=None,
+        boards=[],
+        shared_boards=[],
+        active_board=board_data,
+        is_owner=False,
+        columns=columns_data,
+        tags=tags,
+        stats={"todo": 0, "in_progress": 0, "done": 0},
+        members=[],
+        lang=lang,
+        priority_labels=PRIORITY_LABELS,
+        board_colors=BOARD_COLORS,
+        now=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        readonly=True,
+    )
+
+
+@app.route("/api/boards/<int:board_id>/members", methods=["GET"])
+@login_required
+def api_get_members(board_id):
+    user = get_current_user()
+    b = get_board(board_id, user["id"])
+    if not b or b["user_id"] != user["id"]:
+        return jsonify({"error": "Forbidden"}), 403
+    return jsonify(get_board_members(board_id))
+
+
+@app.route("/api/boards/<int:board_id>/members", methods=["POST"])
+@login_required
+def api_add_member(board_id):
+    """Invite user by Telegram ID. Body: { telegram_id: 123456 }"""
+    user = get_current_user()
+    b = get_board(board_id, user["id"])
+    if not b or b["user_id"] != user["id"]:
+        return jsonify({"error": "Forbidden"}), 403
+    data = request.get_json(silent=True) or {}
+    tg_id = data.get("telegram_id")
+    if not tg_id:
+        return jsonify({"error": "telegram_id required"}), 400
+    member = add_board_member(board_id, int(tg_id))
+    if not member:
+        return jsonify({"error": "User not found or already a member"}), 400
+    return jsonify(member), 201
+
+
+@app.route("/api/boards/<int:board_id>/members/<int:member_user_id>", methods=["DELETE"])
+@login_required
+def api_remove_member(board_id, member_user_id):
+    user = get_current_user()
+    b = get_board(board_id, user["id"])
+    if not b or b["user_id"] != user["id"]:
+        return jsonify({"error": "Forbidden"}), 403
+    ok = remove_board_member(board_id, member_user_id)
     if ok:
         return jsonify({"ok": True})
     return jsonify({"error": "Not found"}), 404

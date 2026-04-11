@@ -13,7 +13,7 @@ from database.db import (
     get_or_create_user, get_or_create_default_board,
     get_tasks_by_status_bot, get_all_tasks_for_user,
     add_task, get_columns, move_task, delete_task, get_stats, get_task,
-    get_boards,
+    get_boards, get_tags, set_task_tags,
 )
 
 router = Router()
@@ -52,6 +52,7 @@ class AddTask(StatesGroup):
     waiting_title    = State()
     waiting_priority = State()
     waiting_deadline = State()
+    waiting_tags     = State()
 
 
 # ── Keyboards ─────────────────────────────────────────────────────────────────
@@ -76,6 +77,23 @@ def deadline_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⏭ Пропустить (без дедлайна)", callback_data="dl:skip")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="dl:cancel")],
     ])
+
+
+def tags_kb(user_id: int, selected_ids: list[int] = None) -> InlineKeyboardMarkup:
+    """Build inline keyboard for tag selection. Selected tags shown with checkmark."""
+    selected_ids = selected_ids or []
+    all_tags = get_tags(user_id)
+    rows = []
+    for t in all_tags:
+        prefix = "✅ " if t["id"] in selected_ids else ""
+        rows.append([InlineKeyboardButton(
+            text=f"{prefix}🏷 {t['name']}",
+            callback_data=f"tag:toggle:{t['id']}"
+        )])
+    rows.append([InlineKeyboardButton(text="✅ Готово — сохранить", callback_data="tag:done")])
+    rows.append([InlineKeyboardButton(text="⏭ Пропустить (без тегов)", callback_data="tag:skip")])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="tag:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def task_actions_kb(task_id: int, current_col_key: str) -> InlineKeyboardMarkup:
@@ -110,10 +128,13 @@ def _fmt_short(t: dict) -> str:
 
 def _fmt_full(t: dict) -> str:
     prio = PRIO_LABELS.get(t.get("priority", "medium"), "")
-    tag  = f"\n🏷 {t['tag_name']}" if t.get("tag_name") else ""
+    tags = t.get("tags", [])
+    tag_str = ""
+    if tags:
+        tag_str = "\n🏷 " + ", ".join(tg["name"] for tg in tags)
     dl   = f"\n📅 {_fmt_dl_display(t['deadline'])}" if t.get("deadline") else ""
     col  = f"\n📂 {t['col_name']}"  if t.get("col_name") else ""
-    return f"<code>#{t['id']}</code> <b>{t['title']}</b>\n{prio}{tag}{dl}{col}"
+    return f"<code>#{t['id']}</code> <b>{t['title']}</b>\n{prio}{tag_str}{dl}{col}"
 
 
 def _parse_add(text: str):
@@ -488,7 +509,19 @@ async def fsm_got_priority(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(AddTask.waiting_deadline, F.data == "dl:skip")
 async def fsm_deadline_skip(call: CallbackQuery, state: FSMContext):
-    await _finish_add(call.message, state, deadline=None, edit=True)
+    await state.update_data(deadline=None)
+    user = get_or_create_user(call.from_user.id, call.from_user.username or "")
+    all_tags = get_tags(user["id"])
+    if not all_tags:
+        # no tags exist, skip tag step entirely
+        await _finish_add(call.message, state, deadline=None, tag_ids=[], edit=True)
+    else:
+        await state.set_state(AddTask.waiting_tags)
+        await state.update_data(selected_tag_ids=[])
+        await call.message.edit_text(
+            "🏷 Выбери теги (можно несколько):",
+            reply_markup=tags_kb(user["id"], []),
+        )
     await call.answer()
 
 
@@ -510,10 +543,61 @@ async def fsm_got_deadline(message: Message, state: FSMContext):
             reply_markup=deadline_kb(),
         )
         return
-    await _finish_add(message, state, deadline=deadline_iso, edit=False)
+    await state.update_data(deadline=deadline_iso)
+    user = get_or_create_user(message.from_user.id, message.from_user.username or "")
+    all_tags = get_tags(user["id"])
+    if not all_tags:
+        await _finish_add(message, state, deadline=deadline_iso, tag_ids=[], edit=False)
+    else:
+        await state.set_state(AddTask.waiting_tags)
+        await state.update_data(selected_tag_ids=[])
+        await message.answer(
+            "🏷 Выбери теги (можно несколько):",
+            reply_markup=tags_kb(user["id"], []),
+        )
 
 
-async def _finish_add(msg, state: FSMContext, deadline, edit: bool):
+# ── FSM: tag selection ─────────────────────────────────────────────────────────
+@router.callback_query(AddTask.waiting_tags, F.data.startswith("tag:toggle:"))
+async def fsm_tag_toggle(call: CallbackQuery, state: FSMContext):
+    tag_id = int(call.data.split(":")[2])
+    data = await state.get_data()
+    selected = data.get("selected_tag_ids", [])
+    if tag_id in selected:
+        selected.remove(tag_id)
+    else:
+        selected.append(tag_id)
+    await state.update_data(selected_tag_ids=selected)
+    user = get_or_create_user(call.from_user.id, call.from_user.username or "")
+    await call.message.edit_reply_markup(reply_markup=tags_kb(user["id"], selected))
+    await call.answer()
+
+
+@router.callback_query(AddTask.waiting_tags, F.data == "tag:done")
+async def fsm_tag_done(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("selected_tag_ids", [])
+    deadline = data.get("deadline")
+    await _finish_add(call.message, state, deadline=deadline, tag_ids=selected, edit=True)
+    await call.answer()
+
+
+@router.callback_query(AddTask.waiting_tags, F.data == "tag:skip")
+async def fsm_tag_skip(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    deadline = data.get("deadline")
+    await _finish_add(call.message, state, deadline=deadline, tag_ids=[], edit=True)
+    await call.answer()
+
+
+@router.callback_query(AddTask.waiting_tags, F.data == "tag:cancel")
+async def fsm_tag_cancel(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("Добавление отменено.", reply_markup=back_to_menu_kb())
+    await call.answer()
+
+
+async def _finish_add(msg, state: FSMContext, deadline, tag_ids: list[int] = None, edit: bool = True):
     data  = await state.get_data()
     title    = data.get("title", "")
     priority = data.get("priority", "medium")
@@ -541,12 +625,16 @@ async def _finish_add(msg, state: FSMContext, deadline, edit: bool):
             await msg.answer(text, reply_markup=back_to_menu_kb())
         return
 
-    task   = add_task(user["id"], board_id, col["id"], title, priority=priority, deadline=deadline)
+    task = add_task(user["id"], board_id, col["id"], title, priority=priority, deadline=deadline, tag_ids=tag_ids or [])
+
     dl_txt = f"\n📅 {_fmt_dl_display(deadline)}" if deadline else ""
+    tags_txt = ""
+    if task.get("tags"):
+        tags_txt = "\n🏷 " + ", ".join(tg["name"] for tg in task["tags"])
     text   = (
         f"✅ Задача добавлена! <code>#{task['id']}</code>\n"
         f"<b>{title}</b>\n"
-        f"Приоритет: {PRIO_LABELS.get(priority, '')}{dl_txt}\n"
+        f"Приоритет: {PRIO_LABELS.get(priority, '')}{dl_txt}{tags_txt}\n"
         f"📋 Доска: <b>{board_name}</b>"
     )
     if edit:

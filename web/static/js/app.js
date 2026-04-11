@@ -17,7 +17,7 @@ function showConfirm(message, onOk) {
   _confirmResolve = onOk;
 }
 function closeConfirm() { confirmDialog.style.display = 'none'; _confirmResolve = null; }
-confirmOkBtn.addEventListener('click', () => { closeConfirm(); _confirmResolve?.(); });
+confirmOkBtn.addEventListener('click', () => { const fn = _confirmResolve; closeConfirm(); fn?.(); });
 confirmCancel.addEventListener('click', closeConfirm);
 confirmDialog.addEventListener('click', e => { if (e.target === confirmDialog) closeConfirm(); });
 
@@ -53,7 +53,7 @@ function setSidebar(open) {
   localStorage.setItem('sidebarOpen', open ? '1' : '0');
 }
 
-$('#sidebar-collapse').onclick = () => setSidebar(sidebar.classList.contains('collapsed'));
+$('#sidebar-collapse')?.addEventListener('click', () => setSidebar(sidebar?.classList.contains('collapsed')));
 $('#sidebar-open')?.addEventListener('click', () => setSidebar(true));
 
 // restore state
@@ -68,8 +68,46 @@ const fDesc        = $('#f-desc');
 const fColumn      = $('#f-column');
 const fPriority    = $('#f-priority');
 const fDeadline    = $('#f-deadline');
-const fTag         = $('#f-tag');
+const fTagSelect   = $('#f-tag-select');
+const tagPickerSel = $('#tag-picker-selected');
 const modalTitleEl = $('#modal-title-text');
+
+/* ── Tag picker state ─────────────────────────────────────────────────────── */
+let selectedTagIds = [];
+
+function renderSelectedTags() {
+  tagPickerSel.innerHTML = '';
+  selectedTagIds.forEach(id => {
+    const tag = TAGS.find(t => t.id === id);
+    if (!tag) return;
+    const pill = document.createElement('span');
+    pill.className = 'tag-picker-pill';
+    pill.style.setProperty('--tc', tag.color);
+    pill.innerHTML = `${esc(tag.name)}<span class="tag-picker-pill-x" data-tag-id="${id}">✕</span>`;
+    tagPickerSel.appendChild(pill);
+  });
+  // hide already-selected tags from dropdown
+  $$('#f-tag-select option').forEach(opt => {
+    if (!opt.value) return; // placeholder
+    opt.style.display = selectedTagIds.includes(parseInt(opt.value)) ? 'none' : '';
+  });
+}
+
+tagPickerSel?.addEventListener('click', e => {
+  const x = e.target.closest('.tag-picker-pill-x');
+  if (!x) return;
+  const id = parseInt(x.dataset.tagId);
+  selectedTagIds = selectedTagIds.filter(t => t !== id);
+  renderSelectedTags();
+});
+
+fTagSelect?.addEventListener('change', () => {
+  const val = parseInt(fTagSelect.value);
+  if (!val || selectedTagIds.includes(val)) { fTagSelect.value = ''; return; }
+  selectedTagIds.push(val);
+  fTagSelect.value = '';
+  renderSelectedTags();
+});
 
 function openTaskModal(mode, data = {}) {
   modalTitleEl.textContent = mode === 'edit' ? T.editTask : T.newTask;
@@ -79,18 +117,22 @@ function openTaskModal(mode, data = {}) {
   fColumn.value    = data.column_id || (COLUMNS_DATA[0]?.id || '');
   fPriority.value  = data.priority  || 'medium';
   fDeadline.value  = data.deadline  ? data.deadline.replace(' ', 'T').slice(0, 16) : '';
-  fTag.value       = data.tag_id    || '';
+
+  // multi-tag: restore selected tags
+  selectedTagIds = (data.tag_ids || []).map(Number).filter(Boolean);
+  renderSelectedTags();
+
   taskModal.style.display = 'flex';
   fTitle.focus();
 }
 
 function closeTaskModal() { taskModal.style.display = 'none'; }
 
-$('#modal-close').onclick   = closeTaskModal;
-$('#modal-cancel').onclick  = closeTaskModal;
-taskModal.addEventListener('click', e => { if (e.target === taskModal) closeTaskModal(); });
+$('#modal-close')?.addEventListener('click', closeTaskModal);
+$('#modal-cancel')?.addEventListener('click', closeTaskModal);
+taskModal?.addEventListener('click', e => { if (e.target === taskModal) closeTaskModal(); });
 
-$('#modal-save').addEventListener('click', async () => {
+$('#modal-save')?.addEventListener('click', async () => {
   const title = fTitle.value.trim();
   if (!title) { fTitle.classList.add('input-error'); fTitle.focus(); return; }
   fTitle.classList.remove('input-error');
@@ -101,7 +143,7 @@ $('#modal-save').addEventListener('click', async () => {
     column_id:   parseInt(fColumn.value),
     priority:    fPriority.value,
     deadline:    fDeadline.value ? fDeadline.value.replace('T', ' ') : null,
-    tag_id:      fTag.value ? parseInt(fTag.value) : null,
+    tag_ids:     selectedTagIds,
     board_id:    ACTIVE_BOARD_ID,
   };
 
@@ -156,12 +198,14 @@ document.addEventListener('click', async e => {
 });
 
 function extractCardData(card) {
+  let tagIds = [];
+  try { tagIds = JSON.parse(card.dataset.tagIds || '[]'); } catch(e) {}
   return {
     id:          card.dataset.id,
     title:       card.querySelector('.card-title')?.textContent.trim() || '',
     description: card.querySelector('.card-desc')?.textContent.trim()  || '',
     column_id:   parseInt(card.dataset.colId),
-    tag_id:      card.dataset.tagId || '',
+    tag_ids:     tagIds,
     priority:    (() => {
       const bar = card.querySelector('.card-prio-bar');
       if (!bar) return 'medium';
@@ -175,9 +219,12 @@ function extractCardData(card) {
 
 /* ── Build card HTML ───────────────────────────────────────────────────────── */
 function buildCardHTML(task) {
-  const tag      = TAGS.find(t => t.id === task.tag_id);
-  const tagName  = task.tag_name  || (tag ? tag.name  : null);
-  const tagColor = task.tag_color || (tag ? tag.color : null);
+  const taskTags = (task.tags || []).map(t => {
+    if (typeof t === 'object') return t;
+    const found = TAGS.find(tg => tg.id === t);
+    return found || null;
+  }).filter(Boolean);
+  const tagIds = taskTags.map(t => t.id);
   const prio     = task.priority || 'medium';
   const prioLabel = T.prio?.[prio] || prio;
   const dl = task.deadline ? task.deadline.replace('T', ' ') : null;
@@ -185,11 +232,17 @@ function buildCardHTML(task) {
   const overdue = dl && dl < now ? ' overdue' : '';
   const dlDisplay = dl ? fmtDeadline(dl) : '';
 
+  const tagsHTML = taskTags.length
+    ? `<div class="card-tags-row">${taskTags.map(t =>
+        `<span class="tag-badge" style="--tc:${esc(t.color)}">${esc(t.name)}</span>`
+      ).join('')}</div>`
+    : '';
+
   return `
-    <div class="card" data-id="${task.id}" data-col-id="${task.column_id}" data-tag-id="${task.tag_id||''}" data-deadline="${esc(dl||'')}" draggable="true">
+    <div class="card" data-id="${task.id}" data-col-id="${task.column_id}" data-tag-ids="${esc(JSON.stringify(tagIds))}" data-deadline="${esc(dl||'')}" draggable="true">
       <div class="card-prio-bar prio-${esc(prio)}"></div>
       <div class="card-inner">
-        ${tagName ? `<span class="tag-badge" style="--tc:${esc(tagColor)}">${esc(tagName)}</span>` : ''}
+        ${tagsHTML}
         <p class="card-title">${esc(task.title)}</p>
         ${task.description ? `<p class="card-desc">${esc(task.description)}</p>` : ''}
         <div class="card-meta-row">
@@ -294,7 +347,7 @@ function getDragAfterElement(container, y) {
 /* ── Update counts ─────────────────────────────────────────────────────────── */
 function updateCounts() {
   $$('.column').forEach(col => {
-    const count = $$('.card', col).length;
+    const count = $$('.card', col).filter(c => c.style.display !== 'none').length;
     const badge = col.querySelector('.column-count');
     if (badge) badge.textContent = count;
   });
@@ -313,11 +366,11 @@ function openColModal(id, name) {
 }
 function closeColModal() { colModal.style.display = 'none'; }
 
-$('#col-modal-close').onclick  = closeColModal;
-$('#col-modal-cancel').onclick = closeColModal;
-colModal.addEventListener('click', e => { if (e.target === colModal) closeColModal(); });
+$('#col-modal-close')?.addEventListener('click', closeColModal);
+$('#col-modal-cancel')?.addEventListener('click', closeColModal);
+colModal?.addEventListener('click', e => { if (e.target === colModal) closeColModal(); });
 
-$('#col-modal-save').addEventListener('click', async () => {
+$('#col-modal-save')?.addEventListener('click', async () => {
   const id   = colModalId.value;
   const name = colNameInput.value.trim();
   if (!name) return;
@@ -375,11 +428,11 @@ function showAddColumnUI() {
 }
 function closeAddColModal() { addColModal.style.display = 'none'; }
 
-$('#add-col-modal-close').onclick  = closeAddColModal;
-$('#add-col-modal-cancel').onclick = closeAddColModal;
-addColModal.addEventListener('click', e => { if (e.target === addColModal) closeAddColModal(); });
+$('#add-col-modal-close')?.addEventListener('click', closeAddColModal);
+$('#add-col-modal-cancel')?.addEventListener('click', closeAddColModal);
+addColModal?.addEventListener('click', e => { if (e.target === addColModal) closeAddColModal(); });
 
-$('#add-col-modal-save').addEventListener('click', async () => {
+$('#add-col-modal-save')?.addEventListener('click', async () => {
   const name = addColNameInput.value.trim();
   if (!name) { addColNameInput.classList.add('input-error'); addColNameInput.focus(); return; }
   addColNameInput.classList.remove('input-error');
@@ -460,9 +513,9 @@ function initColumnDrag(colEl) {
   });
 }
 
-$('#btn-add-column').addEventListener('click', showAddColumnUI);
-$('#btn-add-column-inline').addEventListener('click', showAddColumnUI);
-$('#btn-add-task-topbar').addEventListener('click', () => openTaskModal('new'));
+$('#btn-add-column')?.addEventListener('click', showAddColumnUI);
+$('#btn-add-column-inline')?.addEventListener('click', showAddColumnUI);
+$('#btn-add-task-topbar')?.addEventListener('click', () => openTaskModal('new'));
 
 /* ── Board modal ───────────────────────────────────────────────────────────── */
 const boardModal      = $('#board-modal');
@@ -487,9 +540,9 @@ function openBoardModal(mode, data = {}) {
 }
 function closeBoardModal() { boardModal.style.display = 'none'; }
 
-$('#board-modal-close').onclick   = closeBoardModal;
-$('#board-modal-cancel').onclick  = closeBoardModal;
-boardModal.addEventListener('click', e => { if (e.target === boardModal) closeBoardModal(); });
+$('#board-modal-close')?.addEventListener('click', closeBoardModal);
+$('#board-modal-cancel')?.addEventListener('click', closeBoardModal);
+boardModal?.addEventListener('click', e => { if (e.target === boardModal) closeBoardModal(); });
 
 $$('.color-swatch').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -499,7 +552,7 @@ $$('.color-swatch').forEach(btn => {
   });
 });
 
-$('#btn-add-board').addEventListener('click', () => openBoardModal('new'));
+$('#btn-add-board')?.addEventListener('click', () => openBoardModal('new'));
 
 document.addEventListener('click', e => {
   const editBtn = e.target.closest('.board-nav-edit');
@@ -513,7 +566,7 @@ document.addEventListener('click', e => {
   }
 });
 
-$('#board-modal-save').addEventListener('click', async () => {
+$('#board-modal-save')?.addEventListener('click', async () => {
   const name  = boardNameInput.value.trim();
   const color = boardColorVal.value;
   if (!name) return;
@@ -538,7 +591,7 @@ $('#board-modal-save').addEventListener('click', async () => {
   }
 });
 
-$('#board-delete-btn').addEventListener('click', async () => {
+$('#board-delete-btn')?.addEventListener('click', async () => {
   showConfirm(T.confirmDelBoard, async () => {
     const id = boardModalId.value;
     const res = await fetch(`/api/boards/${id}`, { method: 'DELETE' });
@@ -548,7 +601,7 @@ $('#board-delete-btn').addEventListener('click', async () => {
 });
 
 /* ── Tags ──────────────────────────────────────────────────────────────────── */
-$('#tag-add-form').addEventListener('submit', async e => {
+$('#tag-add-form')?.addEventListener('submit', async e => {
   e.preventDefault();
   const nameInput  = $('#tag-name-input');
   const colorInput = $('#tag-color-input');
@@ -572,20 +625,83 @@ $('#tag-add-form').addEventListener('submit', async e => {
 
   const opt = document.createElement('option');
   opt.value = tag.id; opt.textContent = tag.name; opt.dataset.color = tag.color;
-  fTag.appendChild(opt);
+  fTagSelect.appendChild(opt);
   nameInput.value = '';
 });
 
-$('#sidebar-tags-list').addEventListener('click', async e => {
+$('#sidebar-tags-list')?.addEventListener('click', async e => {
+  // Delete tag button
   const btn = e.target.closest('.tag-del-btn');
-  if (!btn) return;
-  const id = parseInt(btn.dataset.id);
-  const res = await fetch(`/api/tags/${id}`, { method: 'DELETE' });
-  if (!res.ok) return;
-  btn.closest('.tag-pill').remove();
-  const idx = TAGS.findIndex(t => t.id === id);
-  if (idx !== -1) TAGS.splice(idx, 1);
-  fTag.querySelector(`option[value="${id}"]`)?.remove();
+  if (btn) {
+    e.stopPropagation();
+    const id = parseInt(btn.dataset.id);
+    const res = await fetch(`/api/tags/${id}`, { method: 'DELETE' });
+    if (!res.ok) return;
+    btn.closest('.tag-pill').remove();
+    const idx = TAGS.findIndex(t => t.id === id);
+    if (idx !== -1) TAGS.splice(idx, 1);
+    fTagSelect.querySelector(`option[value="${id}"]`)?.remove();
+    selectedTagIds = selectedTagIds.filter(t => t !== id);
+    renderSelectedTags();
+    // clear filter if active tag was deleted
+    if (activeFilterTagId === id) { activeFilterTagId = null; applyTagFilter(); }
+    return;
+  }
+
+  // Tag filter — click on the pill itself
+  const pill = e.target.closest('.tag-pill');
+  if (pill) {
+    const id = parseInt(pill.dataset.id);
+    if (activeFilterTagId === id) {
+      activeFilterTagId = null;
+    } else {
+      activeFilterTagId = id;
+    }
+    applyTagFilter();
+  }
+});
+
+/* ── Tag filter logic ──────────────────────────────────────────────────────── */
+let activeFilterTagId = null;
+const filterChip     = $('#filter-chip');
+const filterChipDot  = $('#filter-chip-dot');
+const filterChipName = $('#filter-chip-name');
+
+function applyTagFilter() {
+  // highlight active pill in sidebar
+  $$('#sidebar-tags-list .tag-pill').forEach(p => {
+    p.classList.toggle('tag-pill-active', parseInt(p.dataset.id) === activeFilterTagId);
+  });
+
+  // update filter chip in topbar
+  if (activeFilterTagId) {
+    const tag = TAGS.find(t => t.id === activeFilterTagId);
+    if (tag) {
+      filterChipDot.style.background = tag.color;
+      filterChipName.textContent = tag.name;
+      filterChip.style.display = '';
+    }
+  } else {
+    filterChip.style.display = 'none';
+  }
+
+  // show/hide cards
+  $$('.card').forEach(card => {
+    if (!activeFilterTagId) {
+      card.style.display = '';
+      return;
+    }
+    let tagIds = [];
+    try { tagIds = JSON.parse(card.dataset.tagIds || '[]'); } catch(e) {}
+    card.style.display = tagIds.includes(activeFilterTagId) ? '' : 'none';
+  });
+
+  updateCounts();
+}
+
+$('#filter-chip-clear')?.addEventListener('click', () => {
+  activeFilterTagId = null;
+  applyTagFilter();
 });
 
 /* ── ESC ───────────────────────────────────────────────────────────────────── */
@@ -603,3 +719,94 @@ document.addEventListener('keydown', e => {
 addColNameInput?.addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); $('#add-col-modal-save').click(); }
 });
+
+/* ── Share Modal ───────────────────────────────────────────────────────────── */
+if (typeof IS_OWNER !== 'undefined' && IS_OWNER && !READONLY) {
+  const shareModal     = $('#share-modal');
+  const shareToggle    = $('#share-toggle');
+  const shareLinkRow   = $('#share-link-row');
+  const shareLinkInput = $('#share-link-input');
+  const membersList    = $('#members-list');
+
+  function openShareModal()  { shareModal.style.display = 'flex'; }
+  function closeShareModal() { shareModal.style.display = 'none'; }
+
+  $('#btn-share')?.addEventListener('click', openShareModal);
+  $('#share-modal-close')?.addEventListener('click', closeShareModal);
+  $('#share-modal-done')?.addEventListener('click', closeShareModal);
+  shareModal?.addEventListener('click', e => { if (e.target === shareModal) closeShareModal(); });
+
+  // toggle public link
+  shareToggle?.addEventListener('change', async () => {
+    const enable = shareToggle.checked;
+    const res = await fetch(`/api/boards/${ACTIVE_BOARD_ID}/share`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ enable }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.share_url) {
+      shareLinkInput.value = data.share_url;
+      shareLinkRow.style.display = '';
+    } else {
+      shareLinkInput.value = '';
+      shareLinkRow.style.display = 'none';
+    }
+  });
+
+  // copy link
+  $('#share-copy-btn')?.addEventListener('click', () => {
+    shareLinkInput.select();
+    navigator.clipboard.writeText(shareLinkInput.value).then(() => {
+      showToast(LANG === 'ru' ? 'Ссылка скопирована' : 'Link copied', 'success');
+    });
+  });
+
+  // invite member
+  $('#invite-btn')?.addEventListener('click', async () => {
+    const input = $('#invite-tg-id');
+    const tgId = input.value.trim();
+    if (!tgId) return;
+    const res = await fetch(`/api/boards/${ACTIVE_BOARD_ID}/members`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ telegram_id: parseInt(tgId) }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      showToast(err.error || 'Error', 'error');
+      return;
+    }
+    const member = await res.json();
+    $('#members-empty')?.remove();
+    const row = document.createElement('div');
+    row.className = 'member-row';
+    row.dataset.userId = member.user_id;
+    row.innerHTML = `<span class="member-name">${esc(member.username || 'User')} <span class="member-tg-id">(${member.telegram_id})</span></span><button class="btn-ghost btn-sm member-remove-btn" data-user-id="${member.user_id}">${LANG === 'ru' ? 'Удалить' : 'Remove'}</button>`;
+    membersList.appendChild(row);
+    input.value = '';
+    showToast(LANG === 'ru' ? 'Участник добавлен' : 'Member added', 'success');
+  });
+
+  // remove member
+  membersList?.addEventListener('click', async e => {
+    const btn = e.target.closest('.member-remove-btn');
+    if (!btn) return;
+    const userId = btn.dataset.userId;
+    const res = await fetch(`/api/boards/${ACTIVE_BOARD_ID}/members/${userId}`, { method: 'DELETE' });
+    if (!res.ok) return;
+    btn.closest('.member-row').remove();
+    if (!membersList.querySelector('.member-row')) {
+      const empty = document.createElement('p');
+      empty.className = 'share-empty';
+      empty.id = 'members-empty';
+      empty.textContent = LANG === 'ru' ? 'Нет участников' : 'No members yet';
+      membersList.appendChild(empty);
+    }
+    showToast(LANG === 'ru' ? 'Участник удалён' : 'Member removed', 'success');
+  });
+
+  // ESC for share modal
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && shareModal?.style.display === 'flex') closeShareModal();
+  });
+}

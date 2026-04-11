@@ -15,7 +15,7 @@ Detailed setup instructions for **Taskify** on a local machine or a VPS.
 ## 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/taskify.git
+git clone https://github.com/Madeline-exe/taskify.git
 cd taskify
 ```
 

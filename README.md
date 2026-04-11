@@ -23,7 +23,9 @@ All features are free. No premium tiers, no paywalls.
 - **Kanban board** -- drag-and-drop columns and cards in the browser
 - **Multiple boards** -- organize projects separately
 - **Custom columns** -- add, rename, and delete columns per board
-- **Tags** -- color-coded labels for categorizing tasks
+- **Multi-tag system** -- assign multiple color-coded tags to each task
+- **Tag filtering** -- click a tag in the sidebar to filter cards across all columns
+- **Board sharing** -- public read-only link + invite collaborators by Telegram ID for full edit access
 - **Priority levels** -- low / medium / high with visual indicators
 - **Deadlines** -- set due dates, overdue tasks are highlighted
 - **Telegram bot with inline buttons** -- full task management without typing commands
@@ -58,10 +60,13 @@ Quick add with pipe syntax: `/add Buy milk | high | 20-04-2026 14:00`
 
 A modern kanban board with a dark sidebar and light content area.
 
-- **Sidebar** -- boards list, tags, language switch, user info
-- **Topbar** -- board name, task counts, +Task and +Column buttons
+- **Sidebar** -- boards list, shared boards, tags (click to filter), language switch, user info
+- **Topbar** -- board name, task counts, active tag filter chip, Share / +Task / +Column buttons
 - **Board** -- draggable cards across custom columns
-- **Modals** -- task editor, board editor, column rename, custom confirm dialogs (no native alerts)
+- **Multi-tag** -- assign multiple tags per task, shown as colored badges on cards
+- **Tag filter** -- click a tag in the sidebar to show only matching cards; topbar chip shows active filter
+- **Board sharing** -- Share button opens a modal with: public read-only link (toggle on/off) + invite members by Telegram ID (full edit access)
+- **Modals** -- task editor, board editor, column rename, share modal, custom confirm dialogs (no native alerts)
 
 Login flow: start `@taskifyjobs_bot` in Telegram -> press the "Web panel" button -> click the link.
 
@@ -114,7 +119,7 @@ taskify/
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/taskify.git
+git clone https://github.com/Madeline-exe/taskify.git
 cd taskify
 python -m venv .venv
 .venv\Scripts\activate        # Windows

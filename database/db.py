@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import uuid
 from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "taskify.db")
@@ -30,12 +31,22 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS boards (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name        TEXT NOT NULL DEFAULT 'My Board',
+            color       TEXT NOT NULL DEFAULT '#5b6af0',
+            position    INTEGER NOT NULL DEFAULT 0,
+            share_token TEXT DEFAULT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS board_members (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            board_id   INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
             user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            name       TEXT NOT NULL DEFAULT 'My Board',
-            color      TEXT NOT NULL DEFAULT '#5b6af0',
-            position   INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            role       TEXT NOT NULL DEFAULT 'editor',
+            added_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(board_id, user_id)
         );
 
         CREATE TABLE IF NOT EXISTS columns (
@@ -67,9 +78,16 @@ def init_db():
             position    INTEGER NOT NULL DEFAULT 0,
             created_at  TEXT NOT NULL DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS task_tags (
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+            PRIMARY KEY (task_id, tag_id)
+        );
     """)
     conn.commit()
     conn.close()
+    _migrate()
 
 
 def _migrate():
@@ -90,6 +108,37 @@ def _migrate():
         cur.execute("ALTER TABLE tasks ADD COLUMN column_id INTEGER REFERENCES columns(id) ON DELETE SET NULL")
     if "tag_id" not in cols:
         cur.execute("ALTER TABLE tasks ADD COLUMN tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL")
+    # ensure task_tags junction table exists
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='task_tags'")
+    if not cur.fetchone():
+        cur.execute("""CREATE TABLE IF NOT EXISTS task_tags (
+            task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+            PRIMARY KEY (task_id, tag_id)
+        )""")
+        # migrate old tag_id data into junction table
+        cur.execute("SELECT id, tag_id FROM tasks WHERE tag_id IS NOT NULL")
+        for row in cur.fetchall():
+            cur.execute(
+                "INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)",
+                (row["id"], row["tag_id"]),
+            )
+    # boards: add share_token column if missing
+    cur.execute("PRAGMA table_info(boards)")
+    board_cols = {row["name"] for row in cur.fetchall()}
+    if "share_token" not in board_cols:
+        cur.execute("ALTER TABLE boards ADD COLUMN share_token TEXT DEFAULT NULL")
+    # board_members table
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='board_members'")
+    if not cur.fetchone():
+        cur.execute("""CREATE TABLE IF NOT EXISTS board_members (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            board_id INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
+            user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            role     TEXT NOT NULL DEFAULT 'editor',
+            added_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(board_id, user_id)
+        )""")
     # remove old status column if present — NOT removing (safe fallback)
     conn.commit()
     conn.close()
@@ -147,12 +196,28 @@ def get_boards(user_id: int) -> list[dict]:
 
 
 def get_board(board_id: int, user_id: int) -> dict | None:
+    """Get board if user is owner OR member."""
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM boards WHERE id = ? AND user_id = ?", (board_id, user_id))
+    cur.execute("SELECT * FROM boards WHERE id = ?", (board_id,))
     row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None
+    board = dict(row)
+    if board["user_id"] == user_id:
+        conn.close()
+        return board
+    # check membership
+    cur.execute(
+        "SELECT id FROM board_members WHERE board_id = ? AND user_id = ?",
+        (board_id, user_id),
+    )
+    if cur.fetchone():
+        conn.close()
+        return board
     conn.close()
-    return dict(row) if row else None
+    return None
 
 
 def add_board(user_id: int, name: str, color: str = "#5b6af0") -> dict:
@@ -210,6 +275,146 @@ def get_or_create_default_board(user_id: int) -> dict:
     if boards:
         return boards[0]
     return add_board(user_id, "Мои задачи")
+
+
+# ── Board Sharing ─────────────────────────────────────────────────────────────
+
+def toggle_share_token(board_id: int, user_id: int, enable: bool) -> str | None:
+    """Enable or disable public share link. Returns share_token or None."""
+    conn = get_connection()
+    cur = conn.cursor()
+    if enable:
+        token = uuid.uuid4().hex[:12]
+        cur.execute(
+            "UPDATE boards SET share_token = ? WHERE id = ? AND user_id = ?",
+            (token, board_id, user_id),
+        )
+    else:
+        token = None
+        cur.execute(
+            "UPDATE boards SET share_token = NULL WHERE id = ? AND user_id = ?",
+            (board_id, user_id),
+        )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def get_board_by_share_token(token: str) -> dict | None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM boards WHERE share_token = ?", (token,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# ── Board Members ─────────────────────────────────────────────────────────────
+
+def get_board_members(board_id: int) -> list[dict]:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT bm.*, u.username, u.telegram_id
+           FROM board_members bm
+           JOIN users u ON bm.user_id = u.id
+           WHERE bm.board_id = ?
+           ORDER BY bm.added_at ASC""",
+        (board_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_board_member(board_id: int, telegram_id: int) -> dict | None:
+    """Invite a user by Telegram ID. Returns member dict or None if user not found."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None
+    target_user_id = row["id"]
+    # check not already owner
+    cur.execute("SELECT user_id FROM boards WHERE id = ?", (board_id,))
+    board_row = cur.fetchone()
+    if board_row and board_row["user_id"] == target_user_id:
+        conn.close()
+        return None  # can't add owner as member
+    try:
+        cur.execute(
+            "INSERT INTO board_members (board_id, user_id) VALUES (?, ?)",
+            (board_id, target_user_id),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return None  # already a member
+    member_id = cur.lastrowid
+    cur.execute(
+        """SELECT bm.*, u.username, u.telegram_id
+           FROM board_members bm
+           JOIN users u ON bm.user_id = u.id
+           WHERE bm.id = ?""",
+        (member_id,),
+    )
+    mrow = cur.fetchone()
+    conn.close()
+    return dict(mrow) if mrow else None
+
+
+def remove_board_member(board_id: int, member_user_id: int) -> bool:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM board_members WHERE board_id = ? AND user_id = ?",
+        (board_id, member_user_id),
+    )
+    changed = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return changed
+
+
+def get_boards_shared_with_user(user_id: int) -> list[dict]:
+    """Get boards where user is a member (not owner)."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT b.*, bm.role, u.username as owner_name
+           FROM board_members bm
+           JOIN boards b ON bm.board_id = b.id
+           JOIN users u ON b.user_id = u.id
+           WHERE bm.user_id = ?
+           ORDER BY b.name ASC""",
+        (user_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def user_can_edit_board(board_id: int, user_id: int) -> bool:
+    """Check if user is owner or member of a board."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM boards WHERE id = ?", (board_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return False
+    if row["user_id"] == user_id:
+        conn.close()
+        return True
+    cur.execute(
+        "SELECT id FROM board_members WHERE board_id = ? AND user_id = ?",
+        (board_id, user_id),
+    )
+    member = cur.fetchone()
+    conn.close()
+    return member is not None
 
 
 # ── Columns ───────────────────────────────────────────────────────────────────
@@ -306,21 +511,80 @@ def delete_tag(tag_id: int, user_id: int) -> bool:
     return changed
 
 
+# ── Task-Tags (many-to-many) ──────────────────────────────────────────────────
+
+def set_task_tags(task_id: int, tag_ids: list[int]):
+    """Replace all tags on a task with given tag_ids list."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM task_tags WHERE task_id = ?", (task_id,))
+    for tid in tag_ids:
+        cur.execute(
+            "INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)",
+            (task_id, tid),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_task_tags(task_id: int) -> list[dict]:
+    """Return list of tags for a task."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT tg.id, tg.name, tg.color
+           FROM task_tags tt JOIN tags tg ON tt.tag_id = tg.id
+           WHERE tt.task_id = ?
+           ORDER BY tg.name""",
+        (task_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _attach_tags_to_tasks(tasks: list[dict]) -> list[dict]:
+    """Given a list of task dicts, attach 'tags' list to each."""
+    if not tasks:
+        return tasks
+    conn = get_connection()
+    cur = conn.cursor()
+    task_ids = [t["id"] for t in tasks]
+    placeholders = ",".join("?" * len(task_ids))
+    cur.execute(
+        f"""SELECT tt.task_id, tg.id, tg.name, tg.color
+            FROM task_tags tt JOIN tags tg ON tt.tag_id = tg.id
+            WHERE tt.task_id IN ({placeholders})
+            ORDER BY tg.name""",
+        task_ids,
+    )
+    tag_map: dict[int, list[dict]] = {}
+    for row in cur.fetchall():
+        tag_map.setdefault(row["task_id"], []).append(
+            {"id": row["id"], "name": row["name"], "color": row["color"]}
+        )
+    conn.close()
+    for t in tasks:
+        t["tags"] = tag_map.get(t["id"], [])
+    return tasks
+
+
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 
 def get_tasks_by_column(board_id: int, column_id: int) -> list[dict]:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """SELECT t.*, tg.name as tag_name, tg.color as tag_color
-           FROM tasks t LEFT JOIN tags tg ON t.tag_id = tg.id
+        """SELECT t.*
+           FROM tasks t
            WHERE t.board_id = ? AND t.column_id = ?
            ORDER BY t.position ASC, t.created_at DESC""",
         (board_id, column_id),
     )
     rows = cur.fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    tasks = [dict(r) for r in rows]
+    return _attach_tags_to_tasks(tasks)
 
 
 def get_all_tasks_for_user(user_id: int) -> list[dict]:
@@ -328,10 +592,9 @@ def get_all_tasks_for_user(user_id: int) -> list[dict]:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """SELECT t.*, tg.name as tag_name, tg.color as tag_color,
+        """SELECT t.*,
                   c.name as col_name, b.name as board_name
            FROM tasks t
-           LEFT JOIN tags tg ON t.tag_id = tg.id
            LEFT JOIN columns c ON t.column_id = c.id
            LEFT JOIN boards b ON t.board_id = b.id
            WHERE t.user_id = ?
@@ -340,7 +603,8 @@ def get_all_tasks_for_user(user_id: int) -> list[dict]:
     )
     rows = cur.fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    tasks = [dict(r) for r in rows]
+    return _attach_tags_to_tasks(tasks)
 
 
 def get_tasks_by_status_bot(user_id: int, col_key: str) -> list[dict]:
@@ -348,9 +612,8 @@ def get_tasks_by_status_bot(user_id: int, col_key: str) -> list[dict]:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """SELECT t.*, tg.name as tag_name, b.name as board_name, c.name as col_name
+        """SELECT t.*, b.name as board_name, c.name as col_name
            FROM tasks t
-           LEFT JOIN tags tg ON t.tag_id = tg.id
            LEFT JOIN columns c ON t.column_id = c.id
            LEFT JOIN boards b ON t.board_id = b.id
            WHERE t.user_id = ? AND c.key = ?
@@ -359,7 +622,8 @@ def get_tasks_by_status_bot(user_id: int, col_key: str) -> list[dict]:
     )
     rows = cur.fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    tasks = [dict(r) for r in rows]
+    return _attach_tags_to_tasks(tasks)
 
 
 def add_task(
@@ -369,6 +633,7 @@ def add_task(
     title: str,
     description: str = "",
     tag_id: int = None,
+    tag_ids: list[int] = None,
     deadline: str = None,
     priority: str = "medium",
 ) -> dict:
@@ -381,29 +646,35 @@ def add_task(
     )
     conn.commit()
     task_id = cur.lastrowid
-    cur.execute(
-        """SELECT t.*, tg.name as tag_name, tg.color as tag_color
-           FROM tasks t LEFT JOIN tags tg ON t.tag_id = tg.id
-           WHERE t.id = ?""",
-        (task_id,),
-    )
+    conn.close()
+
+    # set tags via junction table
+    resolved_tags = tag_ids if tag_ids else ([tag_id] if tag_id else [])
+    if resolved_tags:
+        set_task_tags(task_id, resolved_tags)
+
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
     row = cur.fetchone()
     conn.close()
-    return dict(row)
+    task = dict(row)
+    return _attach_tags_to_tasks([task])[0]
 
 
 def get_task(task_id: int, user_id: int) -> dict | None:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """SELECT t.*, tg.name as tag_name, tg.color as tag_color
-           FROM tasks t LEFT JOIN tags tg ON t.tag_id = tg.id
-           WHERE t.id = ? AND t.user_id = ?""",
+        "SELECT * FROM tasks WHERE id = ? AND user_id = ?",
         (task_id, user_id),
     )
     row = cur.fetchone()
     conn.close()
-    return dict(row) if row else None
+    if not row:
+        return None
+    task = dict(row)
+    return _attach_tags_to_tasks([task])[0]
 
 
 def update_task(task_id: int, user_id: int, **fields) -> bool:
@@ -507,4 +778,5 @@ def get_all_active_tasks_for_digest() -> list[dict]:
     )
     rows = cur.fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    tasks = [dict(r) for r in rows]
+    return _attach_tags_to_tasks(tasks)
