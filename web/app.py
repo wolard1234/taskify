@@ -1,6 +1,10 @@
 import os
 import sys
+import json
 from datetime import datetime
+from urllib.request import urlopen, Request
+from urllib.error import URLError
+from urllib.parse import urlencode
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -67,6 +71,24 @@ BOARD_COLORS = [
     "#0099cc", "#9b59b6", "#e91e8c", "#1abc9c",
 ]
 
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+WEB_URL = os.getenv("WEB_URL", "http://localhost:5000").rstrip("/")
+
+
+def notify_telegram(chat_id: int, text: str, reply_markup: dict = None):
+    """Send a Telegram message via Bot API (fire-and-forget)."""
+    if not BOT_TOKEN or not chat_id:
+        return
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    try:
+        req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+        urlopen(req, timeout=5)
+    except (URLError, OSError):
+        pass  # non-critical, don't break the invite flow
+
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -91,6 +113,7 @@ def get_current_user():
 def login():
     lang = session.get("lang", "ru")
     token = request.args.get("token", "")
+    next_url = request.args.get("next", "")
     error = None
     if token:
         if token.isdigit():
@@ -101,7 +124,7 @@ def login():
             conn.close()
             if row:
                 session["user_id"] = dict(row)["id"]
-                return redirect(url_for("board"))
+                return redirect(next_url or url_for("board"))
         error = "Неверный токен. / Invalid token."
     return render_template("login.html", error=error, lang=lang)
 
@@ -154,7 +177,9 @@ def board():
             "tasks": get_tasks_by_column(active_board["id"], col["id"]),
         })
 
-    tags = get_tags(user["id"])
+    # show board owner's tags when viewing a shared board
+    tag_owner_id = active_board["user_id"] if not is_owner else user["id"]
+    tags = get_tags(tag_owner_id)
     stats = get_board_stats(active_board["id"])
     members = get_board_members(active_board["id"]) if is_owner else []
 
@@ -463,6 +488,27 @@ def api_add_member(board_id):
     if not member:
         err_msg = "Пользователь не найден или уже участник" if "ru" in session.get("lang", "ru") else "User not found or already a member"
         return jsonify({"error": err_msg}), 400
+
+    # Send Telegram notification to the invited user
+    next_page = f"/?board_id={board_id}"
+    board_url = f"{WEB_URL}/login?" + urlencode({"token": member["telegram_id"], "next": next_page})
+    inviter = user.get("username") or "User"
+    board_name = b.get("name", "Board")
+    msg = (
+        f"📋 <b>Вас добавили в доску «{board_name}»</b>\n\n"
+        f"Пригласил: @{inviter}\n"
+        f"Теперь вы можете редактировать задачи на этой доске."
+    )
+    notify_telegram(
+        chat_id=member["telegram_id"],
+        text=msg,
+        reply_markup={
+            "inline_keyboard": [[
+                {"text": "🔗 Открыть доску", "url": board_url}
+            ]]
+        },
+    )
+
     return jsonify(member), 201
 
 
