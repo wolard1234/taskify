@@ -3,7 +3,7 @@ import os
 import uuid
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "taskify.db")
+DB_PATH = os.getenv("TASKIFY_DB_PATH") or os.path.join(os.path.dirname(__file__), "taskify.db")
 
 DEFAULT_COLUMNS = [
     {"key": "todo",        "name_ru": "К выполнению", "name_en": "To Do",       "position": 0},

@@ -142,6 +142,37 @@ taskify/
 
 ## Quick Start
 
+### Docker Compose
+
+Install Docker with the Compose plugin, then clone the fork.
+
+```bash
+git clone https://github.com/wolard1234/taskify.git
+cd taskify
+cp .env.example .env
+```
+
+Set `FLASK_SECRET` and `ADMIN_TOKEN` to unique random values in `.env`.
+For local sign-in without Telegram, set `TASKIFY_DEV_LOGIN=true`.
+
+```bash
+docker compose up --build --wait
+```
+
+Open [the local board](http://localhost:5000/dev-login). If port 5000 is busy,
+set `PORT=5050` and `WEB_URL=http://localhost:5050` in `.env` and use port 5050.
+
+To run the Telegram bot, set `BOT_TOKEN` in `.env` and start the `telegram` profile.
+
+```bash
+docker compose --profile telegram up --build -d
+```
+
+Run `docker compose --profile telegram down` to stop Taskify. The named SQLite
+volume keeps boards and tasks between runs.
+
+### Python
+
 ```bash
 git clone https://github.com/Madeline-exe/taskify.git
 cd taskify
@@ -174,6 +205,7 @@ All settings are in the `.env` file:
 | `ADMIN_TOKEN` | Password for `/admin?token=...` panel | `admin` |
 | `WEB_URL` | Public URL of the web panel | `http://localhost:5000` |
 | `FLASK_DEBUG` | Enable dev login at `/dev-login` | `false` |
+| `TASKIFY_DEV_LOGIN` | Enable `/dev-login` independently of Flask debug mode | `false` in Docker Compose |
 | `PORT` | Web server port | `5000` |
 | `DIGEST_HOUR` | Hour (0-23) for daily digest, Moscow time | `9` |
 

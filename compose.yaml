@@ -1,0 +1,41 @@
+x-taskify: &taskify
+  build: .
+  image: taskify:local
+  volumes:
+    - taskify-data:/data
+
+services:
+  web:
+    <<: *taskify
+    environment:
+      TASKIFY_DB_PATH: /data/taskify.db
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      FLASK_SECRET: ${FLASK_SECRET:?Set FLASK_SECRET in .env}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env}
+      WEB_URL: ${WEB_URL:-http://localhost:${PORT:-5000}}
+      TASKIFY_DEV_LOGIN: ${TASKIFY_DEV_LOGIN:-false}
+      TZ: ${TZ:-Europe/Moscow}
+    ports:
+      - "127.0.0.1:${PORT:-5000}:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:5000/login', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  bot:
+    <<: *taskify
+    profiles: [telegram]
+    command: ["python", "run_bot.py"]
+    environment:
+      TASKIFY_DB_PATH: /data/taskify.db
+      BOT_TOKEN: ${BOT_TOKEN:-}
+      WEB_URL: ${WEB_URL:-http://localhost:${PORT:-5000}}
+      DIGEST_HOUR: ${DIGEST_HOUR:-9}
+      TZ: ${TZ:-Europe/Moscow}
+    depends_on:
+      web:
+        condition: service_healthy
+
+volumes:
+  taskify-data:

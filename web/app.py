@@ -146,7 +146,8 @@ def logout():
 
 @app.route("/dev-login")
 def dev_login():
-    if os.getenv("FLASK_DEBUG", "false").lower() != "true":
+    dev_login_enabled = os.getenv("TASKIFY_DEV_LOGIN", os.getenv("FLASK_DEBUG", "false"))
+    if dev_login_enabled.lower() != "true":
         return "Not available", 403
     init_db()
     user = get_or_create_user(telegram_id=0, username="dev_user")
