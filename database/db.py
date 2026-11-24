@@ -836,7 +836,7 @@ def get_all_tasks_for_user(user_id: int) -> list[dict]:
            LEFT JOIN columns c ON t.column_id = c.id
            LEFT JOIN boards b ON t.board_id = b.id
            WHERE COALESCE(t.assignee_id, t.user_id) = ?
-           ORDER BY t.board_id, t.position ASC, t.created_at DESC""",
+           ORDER BY t.board_id, c.position, c.id, t.position, t.created_at DESC, t.id""",
         (user_id,),
     )
     rows = cur.fetchall()
@@ -946,8 +946,10 @@ def get_task(task_id: int, user_id: int) -> dict | None:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """SELECT t.*, c.name AS col_name
-           FROM tasks t LEFT JOIN columns c ON c.id = t.column_id
+        """SELECT t.*, c.name AS col_name, b.name AS board_name
+           FROM tasks t
+           LEFT JOIN columns c ON c.id = t.column_id
+           LEFT JOIN boards b ON b.id = t.board_id
            WHERE t.id = ? AND COALESCE(t.assignee_id, t.user_id) = ?""",
         (task_id, user_id),
     )
@@ -989,16 +991,17 @@ def update_task(task_id: int, user_id: int, fields: dict, *, tag_ids=None):
 
 
 def move_task(task_id: int, user_id: int, column_id: int) -> bool:
-    """Advance a task to a later column on the same board."""
+    """Advance a task only to the next column on its board."""
     with closing(get_connection()) as conn, conn:
         cur = conn.execute(
             """UPDATE tasks SET column_id = ?
                WHERE id = ? AND COALESCE(assignee_id, user_id) = ?
-                 AND EXISTS (
-                   SELECT 1 FROM columns AS target
+                 AND ? = (
+                   SELECT target.id FROM columns AS target
                    LEFT JOIN columns AS source ON source.id = tasks.column_id AND source.board_id = tasks.board_id
-                   WHERE target.id = ? AND target.board_id = tasks.board_id
+                   WHERE target.board_id = tasks.board_id
                      AND (source.id IS NULL OR (target.position, target.id) > (source.position, source.id))
+                   ORDER BY target.position, target.id LIMIT 1
                  )""",
             (column_id, task_id, user_id, column_id),
         )

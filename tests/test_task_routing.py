@@ -116,8 +116,8 @@ class TaskRoutingTests(TestCase):
         task = response.json
         self.assertEqual(task["assignee_id"], employee)
         self.assertEqual(db.get_task(task["id"], employee)["id"], task["id"])
-        done = db.get_columns(self.target)[-1]["id"]
-        self.assertTrue(db.move_task(task["id"], employee, done))
+        next_column = db.get_columns(self.target)[1]["id"]
+        self.assertTrue(db.move_task(task["id"], employee, next_column))
 
         self.sign_in("guest")
         self.assertEqual(self.client.get(f"/api/boards/{self.target}/columns").status_code, 404)

@@ -61,13 +61,13 @@ In a private chat, send `/start`, choose a department, and enter your full name.
 
 Employees use their task menu. Department leads also see their departments’ task counts; bot administrators see counts for all departments. Lead roles come from board settings, not registration. Set `ADMIN_TELEGRAM_IDS` to grant the bot administrator role.
 
-Task cards offer the later columns on the task’s board, in Kanban order. Task cards and notifications link back to the main menu. Buttons on the latest known chat message update it in place; buttons on older messages open a new message without changing the old one.
+Task cards offer only the next column on the task’s board, in Kanban order. The last column has no move button. Task cards and notifications link back to the main menu. Buttons on the latest known chat message update it in place; buttons on older messages open a new message without changing the old one.
 
 | Button | Action |
 |---|---|
 | My tasks | View active tasks explicitly assigned to you, with quick-action buttons |
 | Add | Create a task: pick board -> enter title -> priority -> deadline -> tags |
-| All tasks | View all tasks grouped by board |
+| All tasks | Browse and open tasks grouped by board and by the current Kanban column order |
 | Stats | Task counts by status |
 | Web panel | Get a personal login link |
 | My profile | See your full name, department, and role |

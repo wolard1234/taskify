@@ -226,24 +226,54 @@ class RegistrationBotTests(IsolatedAsyncioTestCase):
         db.add_board_member(task_board, "tester301")
         backlog, working, review, done = [column["id"] for column in db.get_columns(task_board)]
         task_id = db.add_task(owner, task_board, working, "Анализ", assignee_id=employee)["id"]
+        db.add_task(owner, task_board, review, "Отчёт", assignee_id=employee)
+        db.add_task(owner, task_board, done, "Сводка", assignee_id=employee)
+        profile_column = db.get_columns(profile_board)[0]["id"]
+        for number in range(8):
+            db.add_task(owner, profile_board, profile_column, f"Запрос {number}", assignee_id=employee)
 
-        card, _ = await self.feed(telegram_id, callback=f"task:view:{task_id}")
+        first_page, _ = await self.feed(telegram_id, callback="menu:all")
+        self.assertIn("Страница 1 из 2", first_page.text)
+        next_page = first_page.reply_markup.inline_keyboard[-2][0].callback_data
+        second_page, _ = await self.feed(telegram_id, callback=next_page)
+        self.assertIn("Страница 2 из 2", second_page.text)
+        self.assertLess(second_page.text.index("На проверке"), second_page.text.index("Готово"))
+        view_button = second_page.reply_markup.inline_keyboard[0][0].callback_data
+        self.assertEqual(view_button, f"task:view:{task_id}:all:1")
+
+        card, _ = await self.feed(telegram_id, callback=view_button)
+        self.assertIn("Доска: <b>Аналитики</b>", card.text)
         buttons = card.reply_markup.inline_keyboard
-        self.assertEqual([row[0].text for row in buttons], ["На проверке", "Готово", "◀️ Назад", "◀️ Главное меню"])
-        review_button, done_button = [row[0].callback_data for row in buttons[:2]]
+        self.assertEqual([row[0].text for row in buttons], ["На проверке", "◀️ Назад", "◀️ Главное меню"])
+        self.assertEqual(buttons[-2][0].callback_data, "menu:all:1")
+        review_button = buttons[0][0].callback_data
 
         foreign = db.get_columns(profile_board)[-1]["id"]
-        for callback in (f"task:move:{task_id}:{foreign}", f"task:done:{task_id}"):
+        for callback in (f"task:move:{task_id}:{foreign}", f"task:move:{task_id}:{done}", f"task:done:{task_id}"):
             card, _ = await self.feed(telegram_id, callback=callback)
             self.assertIn("📂 В работе", card.text)
 
         db.update_column(review, task_board, name="Согласование")
         self.assertTrue(db.reorder_columns(task_board, owner, [backlog, working, review, done], [backlog, review, working, done]))
+        refreshed, _ = await self.feed(telegram_id, callback="menu:all:1")
+        self.assertLess(refreshed.text.index("Согласование"), refreshed.text.index("В работе"))
+        self.assertNotIn("На проверке", refreshed.text)
         card, _ = await self.feed(telegram_id, callback=review_button)
         self.assertEqual(db.get_task(task_id, employee)["column_id"], working)
         self.assertEqual([row[0].text for row in card.reply_markup.inline_keyboard], ["Готово", "◀️ Назад", "◀️ Главное меню"])
 
+        mine, _ = await self.feed(telegram_id, callback="menu:list:1")
+        self.assertLess(mine.text.index("Согласование"), mine.text.index("В работе"))
+        self.assertNotIn("Сводка", mine.text)
+        mine_button = mine.reply_markup.inline_keyboard[1][0].callback_data
+        self.assertEqual(mine_button, f"task:view:{task_id}:list:1")
+        card, _ = await self.feed(telegram_id, callback=mine_button)
+        self.assertEqual([row[0].text for row in card.reply_markup.inline_keyboard], ["Готово", "◀️ Назад", "◀️ Главное меню"])
+        self.assertEqual(card.reply_markup.inline_keyboard[-2][0].callback_data, "menu:list:1")
+
         self.assertTrue(db.reorder_columns(task_board, owner, [backlog, review, working, done], [backlog, working, done, review]))
+        card, _ = await self.feed(telegram_id, callback=view_button)
+        done_button = card.reply_markup.inline_keyboard[0][0].callback_data
         card, answer = await self.feed(telegram_id, callback=done_button)
         self.assertIn("📂 Готово", card.text)
         self.assertIn("Задача перемещена", answer.text)
@@ -251,7 +281,7 @@ class RegistrationBotTests(IsolatedAsyncioTestCase):
         self.assertEqual(next_button.text, "Согласование")
         card, _ = await self.feed(telegram_id, callback=next_button.callback_data)
         self.assertEqual(db.get_task(task_id, employee)["column_id"], review)
-        self.assertEqual([row[0].callback_data for row in card.reply_markup.inline_keyboard], ["menu:list", "menu:main"])
+        self.assertEqual([row[0].callback_data for row in card.reply_markup.inline_keyboard], ["menu:all:1", "menu:main"])
 
 
 if __name__ == "__main__":
