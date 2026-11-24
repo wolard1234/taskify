@@ -1,15 +1,27 @@
 import sqlite3
 import os
 import uuid
+import json
+from contextlib import closing
 from datetime import datetime
 
 DB_PATH = os.getenv("TASKIFY_DB_PATH") or os.path.join(os.path.dirname(__file__), "taskify.db")
 
 DEFAULT_COLUMNS = [
-    {"key": "todo",        "name_ru": "К выполнению", "name_en": "To Do",       "position": 0},
-    {"key": "in_progress", "name_ru": "В процессе",   "name_en": "In Progress",  "position": 1},
-    {"key": "done",        "name_ru": "Готово",        "name_en": "Done",         "position": 2},
+    {"key": "todo", "name_ru": "К выполнению", "name_en": "To Do"},
+    {"key": "in_progress", "name_ru": "В процессе", "name_en": "In Progress"},
+    {"key": "done", "name_ru": "Готово", "name_en": "Done"},
 ]
+AGILE_COLUMNS = [
+    {"key": "todo", "name_ru": "Бэклог", "name_en": "Backlog"},
+    {"key": "in_progress", "name_ru": "В работе", "name_en": "In Progress"},
+    {"key": "review", "name_ru": "На проверке", "name_en": "In Review"},
+    DEFAULT_COLUMNS[-1],
+]
+STATUS_KEYS = {
+    col[f"name_{lang}"].casefold(): col["key"]
+    for col in DEFAULT_COLUMNS + AGILE_COLUMNS for lang in ("ru", "en")
+}
 
 
 def get_connection():
@@ -27,6 +39,8 @@ def init_db():
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id INTEGER UNIQUE,
             username    TEXT,
+            full_name   TEXT NOT NULL DEFAULT '',
+            department_id INTEGER REFERENCES boards(id) ON DELETE SET NULL,
             created_at  TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -37,6 +51,7 @@ def init_db():
             color       TEXT NOT NULL DEFAULT '#5b6af0',
             position    INTEGER NOT NULL DEFAULT 0,
             share_token TEXT DEFAULT NULL,
+            department_lead_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
             created_at  TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -45,6 +60,7 @@ def init_db():
             board_id   INTEGER NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
             user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             role       TEXT NOT NULL DEFAULT 'editor',
+            department_staff INTEGER NOT NULL DEFAULT 0,
             added_at   TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(board_id, user_id)
         );
@@ -58,6 +74,14 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS column_templates (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL COLLATE NOCASE,
+            columns_json TEXT NOT NULL,
+            UNIQUE(user_id, name)
+        );
+
         CREATE TABLE IF NOT EXISTS tags (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -68,6 +92,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS tasks (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            assigned_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
             board_id    INTEGER REFERENCES boards(id) ON DELETE CASCADE,
             column_id   INTEGER REFERENCES columns(id) ON DELETE SET NULL,
             tag_id      INTEGER REFERENCES tags(id) ON DELETE SET NULL,
@@ -94,11 +120,17 @@ def _migrate():
     """Non-destructive migration: add missing columns/tables if upgrading old DB."""
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("BEGIN IMMEDIATE")
     # check if boards table exists
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='boards'")
     if not cur.fetchone():
         conn.close()
         return  # fresh DB, nothing to migrate
+    user_cols = {row["name"] for row in cur.execute("PRAGMA table_info(users)")}
+    if "full_name" not in user_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN full_name TEXT NOT NULL DEFAULT ''")
+    if "department_id" not in user_cols:
+        cur.execute("ALTER TABLE users ADD COLUMN department_id INTEGER REFERENCES boards(id) ON DELETE SET NULL")
     # check if tasks has board_id
     cur.execute("PRAGMA table_info(tasks)")
     cols = {row["name"] for row in cur.fetchall()}
@@ -108,6 +140,10 @@ def _migrate():
         cur.execute("ALTER TABLE tasks ADD COLUMN column_id INTEGER REFERENCES columns(id) ON DELETE SET NULL")
     if "tag_id" not in cols:
         cur.execute("ALTER TABLE tasks ADD COLUMN tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL")
+    if "assignee_id" not in cols:
+        cur.execute("ALTER TABLE tasks ADD COLUMN assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
+    if "assigned_by_id" not in cols:
+        cur.execute("ALTER TABLE tasks ADD COLUMN assigned_by_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
     # ensure task_tags junction table exists
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='task_tags'")
     if not cur.fetchone():
@@ -128,6 +164,8 @@ def _migrate():
     board_cols = {row["name"] for row in cur.fetchall()}
     if "share_token" not in board_cols:
         cur.execute("ALTER TABLE boards ADD COLUMN share_token TEXT DEFAULT NULL")
+    if "department_lead_id" not in board_cols:
+        cur.execute("ALTER TABLE boards ADD COLUMN department_lead_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
     # board_members table
     cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='board_members'")
     if not cur.fetchone():
@@ -137,8 +175,10 @@ def _migrate():
             user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             role     TEXT NOT NULL DEFAULT 'editor',
             added_at TEXT NOT NULL DEFAULT (datetime('now')),
-            UNIQUE(board_id, user_id)
+             UNIQUE(board_id, user_id)
         )""")
+    if not any(row["name"] == "department_staff" for row in cur.execute("PRAGMA table_info(board_members)")):
+        cur.execute("ALTER TABLE board_members ADD COLUMN department_staff INTEGER NOT NULL DEFAULT 0")
     # remove old status column if present — NOT removing (safe fallback)
     conn.commit()
     conn.close()
@@ -181,6 +221,17 @@ def get_all_users() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def register_user(user_id: int, department_id: int, full_name: str) -> bool:
+    with closing(get_connection()) as conn, conn:
+        result = conn.execute(
+            """UPDATE users SET department_id = ?, full_name = ?
+               WHERE id = ? AND (full_name = '' OR department_id IS NULL)
+                 AND EXISTS (SELECT 1 FROM boards WHERE id = ? AND department_lead_id IS NOT NULL)""",
+            (department_id, full_name, user_id, department_id),
+        )
+        return result.rowcount == 1
+
+
 # ── Boards ────────────────────────────────────────────────────────────────────
 
 def get_boards(user_id: int) -> list[dict]:
@@ -220,28 +271,16 @@ def get_board(board_id: int, user_id: int) -> dict | None:
     return None
 
 
-def add_board(user_id: int, name: str, color: str = "#5b6af0") -> dict:
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT COALESCE(MAX(position),0)+1 FROM boards WHERE user_id = ?", (user_id,))
-    pos = cur.fetchone()[0]
-    cur.execute(
-        "INSERT INTO boards (user_id, name, color, position) VALUES (?, ?, ?, ?)",
-        (user_id, name, color, pos),
-    )
-    conn.commit()
-    board_id = cur.lastrowid
-    # create default columns for this board
-    for col in DEFAULT_COLUMNS:
-        cur.execute(
-            "INSERT INTO columns (board_id, key, name, position) VALUES (?, ?, ?, ?)",
-            (board_id, col["key"], col["name_ru"], col["position"]),
-        )
-    conn.commit()
-    cur.execute("SELECT * FROM boards WHERE id = ?", (board_id,))
-    row = cur.fetchone()
-    conn.close()
-    return dict(row)
+def add_board(user_id: int, name: str, color: str = "#5b6af0", *, columns: list[str] | None = None) -> dict:
+    with closing(get_connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        pos = conn.execute("SELECT COALESCE(MAX(position),0)+1 FROM boards WHERE user_id = ?", (user_id,)).fetchone()[0]
+        board_id = conn.execute(
+            "INSERT INTO boards (user_id, name, color, position) VALUES (?, ?, ?, ?)",
+            (user_id, name, color, pos),
+        ).lastrowid
+        _apply_column_names(conn, board_id, columns if columns is not None else [col["name_ru"] for col in DEFAULT_COLUMNS])
+        return dict(conn.execute("SELECT * FROM boards WHERE id = ?", (board_id,)).fetchone())
 
 
 def update_board(board_id: int, user_id: int, **fields) -> bool:
@@ -378,6 +417,13 @@ def remove_board_member(board_id: int, member_user_id: int) -> bool:
         (board_id, member_user_id),
     )
     changed = cur.rowcount > 0
+    if changed:
+        cur.execute("UPDATE boards SET department_lead_id = NULL WHERE id = ? AND department_lead_id = ?",
+                    (board_id, member_user_id))
+        cur.execute(
+            "UPDATE tasks SET assignee_id = NULL WHERE board_id = ? AND assignee_id = ?",
+            (board_id, member_user_id),
+        )
     conn.commit()
     conn.close()
     return changed
@@ -403,26 +449,136 @@ def get_boards_shared_with_user(user_id: int) -> list[dict]:
 
 def user_can_edit_board(board_id: int, user_id: int) -> bool:
     """Check if user is owner or member of a board."""
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id FROM boards WHERE id = ?", (board_id,))
-    row = cur.fetchone()
-    if not row:
-        conn.close()
-        return False
-    if row["user_id"] == user_id:
-        conn.close()
+    with closing(get_connection()) as conn:
+        return _board_has_editor(conn, board_id, user_id)
+
+
+def _board_has_editor(conn, board_id, user_id):
+    return conn.execute(
+        """SELECT 1 FROM boards WHERE id = ? AND (
+               user_id = ? OR EXISTS (
+                   SELECT 1 FROM board_members WHERE board_id = boards.id AND user_id = ?
+               )
+           )""",
+        (board_id, user_id, user_id),
+    ).fetchone() is not None
+
+
+def get_departments(owner_id: int, viewer_id: int) -> dict:
+    with closing(get_connection()) as conn:
+        return _departments(conn, owner_id, viewer_id)
+
+
+def get_registration_departments() -> list[dict]:
+    with closing(get_connection()) as conn:
+        return [dict(row) for row in conn.execute(
+            """SELECT id, name, department_lead_id FROM boards WHERE department_lead_id IS NOT NULL
+               ORDER BY name COLLATE NOCASE, id"""
+        )]
+
+
+def _departments(conn, owner_id, viewer_id):
+    departments = {}
+    team_member = viewer_id == owner_id
+    for row in conn.execute(
+        """SELECT b.id AS board_id, b.name, b.department_lead_id AS lead_id, u.id AS user_id, u.username
+           FROM boards b JOIN users u ON u.id = b.department_lead_id OR u.id IN (
+               SELECT m.user_id FROM board_members m WHERE m.board_id = b.id AND m.department_staff = 1
+           )
+           WHERE b.user_id = ? AND b.department_lead_id IS NOT NULL
+           ORDER BY b.position, b.id, u.username, u.id""", (owner_id,),
+    ):
+        department = departments.setdefault(row["board_id"], {"name": row["name"], "lead_id": row["lead_id"], "staff": {}})
+        department["staff"][row["user_id"]] = row["username"] or f'#{row["user_id"]}'
+        team_member = team_member or row["user_id"] == viewer_id
+    return departments if team_member else {}
+
+
+def update_department(board_id: int, owner_id: int, lead_id: int | None, staff_ids: set[int]) -> bool:
+    with closing(get_connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute("SELECT 1 FROM boards WHERE id = ? AND user_id = ?", (board_id, owner_id)).fetchone():
+            return False
+        members = {row["user_id"] for row in conn.execute("SELECT user_id FROM board_members WHERE board_id = ?", (board_id,))}
+        if not staff_ids <= members or (lead_id is not None and lead_id != owner_id and lead_id not in members):
+            raise InvalidDepartment("Choose users who are members of the board")
+        conn.execute("UPDATE boards SET department_lead_id = ? WHERE id = ?", (lead_id, board_id))
+        conn.executemany("UPDATE board_members SET department_staff = ? WHERE board_id = ? AND user_id = ?",
+                         ((int(user_id in staff_ids), board_id, user_id) for user_id in members))
         return True
-    cur.execute(
-        "SELECT id FROM board_members WHERE board_id = ? AND user_id = ?",
-        (board_id, user_id),
-    )
-    member = cur.fetchone()
-    conn.close()
-    return member is not None
 
 
 # ── Columns ───────────────────────────────────────────────────────────────────
+
+def get_column_templates(user_id: int, lang: str) -> dict:
+    label = "name_en" if lang == "en" else "name_ru"
+    templates = {"agile": {"name": "Agile", "columns": [col[label] for col in AGILE_COLUMNS]}}
+    with closing(get_connection()) as conn:
+        for row in conn.execute("SELECT id, name, columns_json FROM column_templates WHERE user_id = ? ORDER BY id", (user_id,)):
+            templates[str(row["id"])] = {"name": row["name"], "columns": json.loads(row["columns_json"])}
+    return templates
+
+
+def save_column_template(user_id: int, name: str, names: list[str]) -> int | None:
+    with closing(get_connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if any(row["name"].casefold() == name.casefold() for row in conn.execute(
+            "SELECT name FROM column_templates WHERE user_id = ?", (user_id,)
+        )):
+            return None
+        return conn.execute(
+            "INSERT INTO column_templates (user_id, name, columns_json) VALUES (?, ?, ?)",
+            (user_id, name, json.dumps(names, ensure_ascii=False)),
+        ).lastrowid
+
+
+def apply_column_template(board_id: int, user_id: int, names: list[str]) -> bool:
+    with closing(get_connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not conn.execute("SELECT 1 FROM boards WHERE id = ? AND user_id = ?", (board_id, user_id)).fetchone():
+            return False
+        _apply_column_names(conn, board_id, names)
+        return True
+
+
+def _apply_column_names(conn, board_id: int, names: list[str]):
+    remaining = {row["id"]: row for row in conn.execute(
+        """SELECT c.id, c.name, c.key, EXISTS(SELECT 1 FROM tasks t WHERE t.column_id = c.id) AS has_tasks
+           FROM columns c WHERE c.board_id = ? ORDER BY c.position, c.id""", (board_id,)
+    )}
+    matches = {}
+    # Match names before status keys so a rename cannot take a later exact match.
+    for name in names:
+        match = next((col for col in remaining.values() if col["name"].casefold() == name.casefold()), None)
+        if match:
+            matches[name] = remaining.pop(match["id"])
+
+    statuses = {name: STATUS_KEYS.get(name.casefold()) for name in names}
+    for name, key in statuses.items():
+        if name in matches or key is None:
+            continue
+        match = next((col for col in remaining.values() if col["key"] == key), None)
+        if match:
+            matches[name] = remaining.pop(match["id"])
+
+    kept = [col for col in remaining.values() if col["has_tasks"]]
+    reserved = {col["key"] for col in [*matches.values(), *kept]}
+    for position, (name, key) in enumerate(statuses.items()):
+        col = matches.get(name)
+        if key is None or key in reserved or (col and not col["key"].startswith("col_")):
+            key = col["key"] if col else f"col_{uuid.uuid4().hex}"
+        reserved.add(key)
+        if col:
+            conn.execute("UPDATE columns SET name = ?, key = ?, position = ? WHERE id = ?", (name, key, position, col["id"]))
+        else:
+            conn.execute(
+                "INSERT INTO columns (board_id, key, name, position) VALUES (?, ?, ?, ?)", (board_id, key, name, position)
+            )
+
+    conn.executemany("UPDATE columns SET position = ? WHERE id = ?",
+                     ((position, col["id"]) for position, col in enumerate(kept, start=len(names))))
+    conn.executemany("DELETE FROM columns WHERE id = ?", ((col["id"],) for col in remaining.values() if not col["has_tasks"]))
+
 
 def get_columns(board_id: int) -> list[dict]:
     conn = get_connection()
@@ -436,9 +592,31 @@ def get_columns(board_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def reorder_columns(board_id: int, user_id: int, previous_ids: list[int], column_ids: list[int]) -> bool:
+    with closing(get_connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not _board_has_editor(conn, board_id, user_id):
+            raise PermissionError("Board access required")
+        current_ids = [
+            row["id"] for row in conn.execute(
+                "SELECT id FROM columns WHERE board_id = ? ORDER BY position, id", (board_id,)
+            )
+        ]
+        if current_ids == column_ids:
+            return True
+        if current_ids != previous_ids:
+            return False
+        conn.executemany(
+            "UPDATE columns SET position = ? WHERE id = ? AND board_id = ?",
+            ((position, column_id, board_id) for position, column_id in enumerate(column_ids)),
+        )
+        return True
+
+
 def add_column(board_id: int, name: str) -> dict:
     conn = get_connection()
     cur = conn.cursor()
+    cur.execute("BEGIN IMMEDIATE")
     cur.execute("SELECT COALESCE(MAX(position),0)+1 FROM columns WHERE board_id = ?", (board_id,))
     pos = cur.fetchone()[0]
     key = f"col_{int(datetime.now().timestamp())}"
@@ -520,7 +698,11 @@ def delete_tag(tag_id: int, user_id: int) -> bool:
 
 def set_task_tags(task_id: int, tag_ids: list[int]):
     """Replace all tags on a task with given tag_ids list."""
-    conn = get_connection()
+    with closing(get_connection()) as conn, conn:
+        _set_task_tags(conn, task_id, tag_ids)
+
+
+def _set_task_tags(conn, task_id, tag_ids):
     cur = conn.cursor()
     cur.execute("DELETE FROM task_tags WHERE task_id = ?", (task_id,))
     for tid in tag_ids:
@@ -528,8 +710,6 @@ def set_task_tags(task_id: int, tag_ids: list[int]):
             "INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?)",
             (task_id, tid),
         )
-    conn.commit()
-    conn.close()
 
 
 def get_task_tags(task_id: int) -> list[dict]:
@@ -576,13 +756,20 @@ def _attach_tags_to_tasks(tasks: list[dict]) -> list[dict]:
 
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 
+TASKS_WITH_SENDER = """
+    SELECT t.*,
+           CASE WHEN sender.username IS NULL OR sender.username = '' THEN '#' || sender.id
+                ELSE '@' || sender.username END AS sender_name
+    FROM tasks t
+    JOIN users sender ON sender.id = COALESCE(t.assigned_by_id, t.user_id)
+"""
+
+
 def get_tasks_by_column(board_id: int, column_id: int) -> list[dict]:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        """SELECT t.*
-           FROM tasks t
-           WHERE t.board_id = ? AND t.column_id = ?
+        TASKS_WITH_SENDER + """WHERE t.board_id = ? AND t.column_id = ?
            ORDER BY t.position ASC, t.created_at DESC""",
         (board_id, column_id),
     )
@@ -598,11 +785,11 @@ def get_all_tasks_for_user(user_id: int) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """SELECT t.*,
-                  c.name as col_name, b.name as board_name
+                  c.name as col_name, c.key as col_key, b.name as board_name
            FROM tasks t
            LEFT JOIN columns c ON t.column_id = c.id
            LEFT JOIN boards b ON t.board_id = b.id
-           WHERE t.user_id = ?
+           WHERE COALESCE(t.assignee_id, t.user_id) = ?
            ORDER BY t.board_id, t.position ASC, t.created_at DESC""",
         (user_id,),
     )
@@ -621,7 +808,7 @@ def get_tasks_by_status_bot(user_id: int, col_key: str) -> list[dict]:
            FROM tasks t
            LEFT JOIN columns c ON t.column_id = c.id
            LEFT JOIN boards b ON t.board_id = b.id
-           WHERE t.user_id = ? AND c.key = ?
+           WHERE COALESCE(t.assignee_id, t.user_id) = ? AND c.key = ?
            ORDER BY t.position ASC, t.created_at DESC""",
         (user_id, col_key),
     )
@@ -631,38 +818,77 @@ def get_tasks_by_status_bot(user_id: int, col_key: str) -> list[dict]:
     return _attach_tags_to_tasks(tasks)
 
 
+class InvalidAssignee(ValueError):
+    pass
+
+
+class InvalidDepartment(ValueError):
+    pass
+
+
+def _check_assignee(conn, board_id, assignee_id):
+    if assignee_id is not None and (
+        type(assignee_id) is not int
+        or not 0 < assignee_id <= 2**63 - 1
+        or not _board_has_editor(conn, board_id, assignee_id)
+    ):
+        raise InvalidAssignee("Choose a member of this board")
+
+
 def add_task(
     user_id: int,
     board_id: int,
-    column_id: int,
+    column_id: int | None,
     title: str,
     description: str = "",
     tag_id: int = None,
     tag_ids: list[int] = None,
     deadline: str = None,
     priority: str = "medium",
+    assignee_id: int | None = None,
+    *,
+    department_id: int | None = None,
 ) -> dict:
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """INSERT INTO tasks (user_id, board_id, column_id, title, description, tag_id, deadline, priority)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (user_id, board_id, column_id, title, description, tag_id, deadline, priority),
-    )
-    conn.commit()
-    task_id = cur.lastrowid
-    conn.close()
-
-    # set tags via junction table
-    resolved_tags = tag_ids if tag_ids else ([tag_id] if tag_id else [])
-    if resolved_tags:
-        set_task_tags(task_id, resolved_tags)
-
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
-    row = cur.fetchone()
-    conn.close()
+    with closing(get_connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not _board_has_editor(conn, board_id, user_id):
+            raise PermissionError("Board access required")
+        if department_id is not None:
+            owner_id = conn.execute("SELECT user_id FROM boards WHERE id = ?", (board_id,)).fetchone()["user_id"]
+            department = _departments(conn, owner_id, user_id).get(department_id)
+            if department is None or (assignee_id is not None and (
+                type(assignee_id) is not int or assignee_id not in department["staff"]
+            )):
+                raise InvalidDepartment("Department or assignee unavailable")
+            board_id = department_id
+            assignee_id = department["lead_id"] if assignee_id is None else assignee_id
+            column_id = None
+        else:
+            _check_assignee(conn, board_id, assignee_id)
+        if column_id is None:
+            first = conn.execute("""SELECT id FROM columns WHERE board_id = ?
+                                  ORDER BY (key = 'todo') DESC, (key = 'done'), position, id LIMIT 1""", (board_id,)).fetchone()
+            if first is None:
+                raise ValueError("The board has no columns")
+            column_id = first["id"]
+        elif conn.execute(
+            "SELECT 1 FROM columns WHERE id = ? AND board_id = ?", (column_id, board_id)
+        ).fetchone() is None:
+            raise ValueError("Choose a column on this board")
+        cur = conn.execute(
+            """INSERT INTO tasks
+               (user_id, board_id, column_id, title, description, tag_id, deadline, priority, assignee_id, assigned_by_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                user_id, board_id, column_id, title, description, tag_id, deadline, priority,
+                assignee_id, user_id if assignee_id is not None else None,
+            ),
+        )
+        task_id = cur.lastrowid
+        resolved_tags = tag_ids or ([tag_id] if tag_id else [])
+        if resolved_tags:
+            _set_task_tags(conn, task_id, resolved_tags)
+        row = conn.execute(TASKS_WITH_SENDER + "WHERE t.id = ?", (task_id,)).fetchone()
     task = dict(row)
     return _attach_tags_to_tasks([task])[0]
 
@@ -671,7 +897,9 @@ def get_task(task_id: int, user_id: int) -> dict | None:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM tasks WHERE id = ? AND user_id = ?",
+        """SELECT t.*, c.name AS col_name
+           FROM tasks t LEFT JOIN columns c ON c.id = t.column_id
+           WHERE t.id = ? AND COALESCE(t.assignee_id, t.user_id) = ?""",
         (task_id, user_id),
     )
     row = cur.fetchone()
@@ -682,24 +910,44 @@ def get_task(task_id: int, user_id: int) -> dict | None:
     return _attach_tags_to_tasks([task])[0]
 
 
-def update_task(task_id: int, user_id: int, **fields) -> bool:
-    allowed = {"title", "description", "column_id", "priority", "deadline", "tag_id", "position"}
+def update_task(task_id: int, user_id: int, fields: dict, *, tag_ids=None):
+    allowed = {"title", "description", "column_id", "priority", "deadline", "assignee_id"}
     updates = {k: v for k, v in fields.items() if k in allowed}
-    if not updates:
-        return False
-    set_clause = ", ".join(f"{k} = ?" for k in updates)
-    values = list(updates.values()) + [task_id, user_id]
-    conn = get_connection()
-    cur = conn.cursor()
-    cur.execute(f"UPDATE tasks SET {set_clause} WHERE id = ? AND user_id = ?", values)
-    changed = cur.rowcount > 0
-    conn.commit()
-    conn.close()
-    return changed
+    with closing(get_connection()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        original = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if original is None or not _board_has_editor(conn, original["board_id"], user_id):
+            return None, None
+        if "assignee_id" in updates:
+            assignee_id = updates["assignee_id"]
+            _check_assignee(conn, original["board_id"], assignee_id)
+            if assignee_id is not None and assignee_id != original["assignee_id"]:
+                updates["assigned_by_id"] = user_id
+        if "column_id" in updates:
+            column = conn.execute(
+                "SELECT 1 FROM columns WHERE id = ? AND board_id = ?",
+                (updates["column_id"], original["board_id"]),
+            ).fetchone()
+            if column is None:
+                raise ValueError("Choose a column on this board")
+        if updates:
+            set_clause = ", ".join(f"{key} = ?" for key in updates)
+            conn.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", (*updates.values(), task_id))
+        if tag_ids is not None:
+            _set_task_tags(conn, task_id, tag_ids)
+        row = conn.execute(TASKS_WITH_SENDER + "WHERE t.id = ?", (task_id,)).fetchone()
+    return _attach_tags_to_tasks([dict(row)])[0], original["assignee_id"]
 
 
 def move_task(task_id: int, user_id: int, column_id: int) -> bool:
-    return update_task(task_id, user_id, column_id=column_id)
+    with closing(get_connection()) as conn, conn:
+        cur = conn.execute(
+            """UPDATE tasks SET column_id = ?
+               WHERE id = ? AND COALESCE(assignee_id, user_id) = ?
+                 AND EXISTS (SELECT 1 FROM columns WHERE id = ? AND board_id = tasks.board_id)""",
+            (column_id, task_id, user_id, column_id),
+        )
+        return cur.rowcount > 0
 
 
 def delete_task(task_id: int, user_id: int) -> bool:
@@ -722,7 +970,7 @@ def get_stats(user_id: int) -> dict:
         """SELECT c.key, COUNT(t.id) as cnt
            FROM tasks t
            JOIN columns c ON t.column_id = c.id
-           WHERE t.user_id = ?
+           WHERE COALESCE(t.assignee_id, t.user_id) = ?
            GROUP BY c.key""",
         (user_id,),
     )
@@ -783,8 +1031,10 @@ def get_upcoming_deadlines(hours: int = 24) -> list[dict]:
     cur.execute(
         """SELECT t.*, u.telegram_id
            FROM tasks t
-           JOIN users u ON t.user_id = u.id
+           JOIN users u ON COALESCE(t.assignee_id, t.user_id) = u.id
+           LEFT JOIN columns c ON c.id = t.column_id
            WHERE t.deadline IS NOT NULL
+             AND (c.key IS NULL OR c.key != 'done')
              AND t.deadline > ?
              AND t.deadline <= ?
            ORDER BY t.deadline ASC""",
@@ -802,7 +1052,7 @@ def get_all_active_tasks_for_digest() -> list[dict]:
     cur.execute(
         """SELECT t.*, u.telegram_id, c.key as col_key, c.name as col_name
            FROM tasks t
-           JOIN users u ON t.user_id = u.id
+           JOIN users u ON COALESCE(t.assignee_id, t.user_id) = u.id
            JOIN columns c ON t.column_id = c.id
            WHERE c.key != 'done'
            ORDER BY u.telegram_id, t.priority DESC, t.deadline ASC""",

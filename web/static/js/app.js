@@ -44,33 +44,45 @@ function fmtDeadline(iso) {
 }
 
 /* ── Sidebar collapse ──────────────────────────────────────────────────────── */
-const sidebar   = $('#sidebar');
-const mainArea  = $('.main-area');
+const sidebar = $('#sidebar');
+const sidebarOpen = $('#sidebar-open');
+const sidebarCollapse = $('#sidebar-collapse');
+const drawerLayout = matchMedia('(max-width: 900px)');
 
 function setSidebar(open) {
   sidebar.classList.toggle('collapsed', !open);
-  mainArea?.classList.toggle('sidebar-open', open);
-  localStorage.setItem('sidebarOpen', open ? '1' : '0');
+  if (!open && sidebar.contains(document.activeElement)) {
+    sidebarOpen?.focus({preventScroll: true});
+  }
+  sidebar.inert = !open;
+  sidebarOpen?.setAttribute('aria-expanded', String(open));
 }
 
-$('#sidebar-collapse')?.addEventListener('click', () => setSidebar(sidebar?.classList.contains('collapsed')));
-$('#sidebar-open')?.addEventListener('click', () => setSidebar(true));
+sidebarCollapse?.addEventListener('click', () => setSidebar(false));
+sidebarOpen?.addEventListener('click', () => {
+  setSidebar(true);
+  sidebarCollapse.focus({preventScroll: true});
+});
+$('#sidebar-backdrop').addEventListener('click', () => setSidebar(false));
 
-// restore state
-const savedSidebar = localStorage.getItem('sidebarOpen');
-setSidebar(savedSidebar === null ? true : savedSidebar === '1');
+setSidebar(!READONLY && !drawerLayout.matches);
+drawerLayout.addEventListener('change', event => setSidebar(!READONLY && !event.matches));
 
 /* ── Task Modal ────────────────────────────────────────────────────────────── */
 const taskModal    = $('#task-modal');
 const fId          = $('#modal-task-id');
 const fTitle       = $('#f-title');
 const fDesc        = $('#f-desc');
+const fDepartment  = $('#f-department');
+const fAssignee    = $('#f-assignee');
 const fColumn      = $('#f-column');
 const fPriority    = $('#f-priority');
 const fDeadline    = $('#f-deadline');
 const fTagSelect   = $('#f-tag-select');
 const tagPickerSel = $('#tag-picker-selected');
 const modalTitleEl = $('#modal-title-text');
+const saveTaskBtn  = $('#modal-save');
+const taskError    = $('#task-error');
 
 /* ── Tag picker state ─────────────────────────────────────────────────────── */
 let selectedTagIds = [];
@@ -109,12 +121,40 @@ fTagSelect?.addEventListener('change', () => {
   renderSelectedTags();
 });
 
-function openTaskModal(mode, data = {}) {
-  modalTitleEl.textContent = mode === 'edit' ? T.editTask : T.newTask;
+function renderAssignees() {
+  const editing = Boolean(fId.value);
+  const department = editing ? undefined : DEPARTMENTS[fDepartment.value];
+  const assignees = department ? department.staff : ASSIGNEES;
+  const routed = !editing && !department
+    ? new Set(Object.values(DEPARTMENTS).flatMap(({staff}) => Object.keys(staff)))
+    : new Set();
+  fAssignee.replaceChildren(new Option(department ? T.assignToLead : T.unassigned, ''));
+  if (Object.hasOwn(assignees, CURRENT_USER_ID)) fAssignee.add(new Option(T.me, CURRENT_USER_ID));
+  for (const [id, username] of Object.entries(assignees).sort(([, a], [, b]) => a.localeCompare(b, LANG))) {
+    if (id !== String(CURRENT_USER_ID) && !routed.has(id)) fAssignee.add(new Option(`@${username}`, id));
+  }
+}
+
+fDepartment?.addEventListener('change', renderAssignees);
+
+function openTaskModal(data = {}) {
+  const editing = Boolean(data.id);
+  modalTitleEl.textContent = editing ? data.title : T.newTask;
+  taskModal.toggleAttribute('data-editing', editing);
+  taskError.textContent = '';
   fId.value        = data.id        || '';
   fTitle.value     = data.title     || '';
+  fTitle.classList.remove('input-error');
   fDesc.value      = data.description || '';
-  fColumn.value    = data.column_id || (COLUMNS_DATA[0]?.id || '');
+  $('#f-department-row').hidden = editing;
+  $('#f-column-row').hidden = !editing;
+  $('#f-sender-row').hidden = !data.sender;
+  $('#f-sender').textContent = data.sender ?? '';
+  fDepartment.value = '';
+  renderAssignees();
+  if (data.assignee_id) fAssignee.value = data.assignee_id;
+  fAssignee.dataset.original = fAssignee.value;
+  fColumn.value    = data.column_id || '';
   fPriority.value  = data.priority  || 'medium';
   fDeadline.value  = data.deadline  ? data.deadline.replace(' ', 'T').slice(0, 16) : '';
 
@@ -122,79 +162,113 @@ function openTaskModal(mode, data = {}) {
   selectedTagIds = (data.tag_ids || []).map(Number).filter(Boolean);
   renderSelectedTags();
 
-  taskModal.style.display = 'flex';
-  fTitle.focus();
+  taskModal.showModal();
+  taskModal.scrollTop = 0;
+  if (!editing) fTitle.focus();
 }
 
-function closeTaskModal() { taskModal.style.display = 'none'; }
+function closeTaskModal() { if (!saveTaskBtn.disabled) taskModal.close(); }
 
 $('#modal-close')?.addEventListener('click', closeTaskModal);
 $('#modal-cancel')?.addEventListener('click', closeTaskModal);
-taskModal?.addEventListener('click', e => { if (e.target === taskModal) closeTaskModal(); });
+taskModal?.addEventListener('cancel', e => { if (saveTaskBtn.disabled) e.preventDefault(); });
 
-$('#modal-save')?.addEventListener('click', async () => {
+$('#task-form')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (saveTaskBtn.disabled) return;
+  taskError.textContent = '';
   const title = fTitle.value.trim();
   if (!title) { fTitle.classList.add('input-error'); fTitle.focus(); return; }
   fTitle.classList.remove('input-error');
 
+  const editing = Boolean(fId.value);
   const body = {
     title,
     description: fDesc.value.trim(),
-    column_id:   parseInt(fColumn.value),
     priority:    fPriority.value,
     deadline:    fDeadline.value ? fDeadline.value.replace('T', ' ') : null,
     tag_ids:     selectedTagIds,
     board_id:    ACTIVE_BOARD_ID,
   };
-
-  if (fId.value) {
-    const res = await fetch(`/api/tasks/${fId.value}`, {
-      method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
-    });
-    if (!res.ok) return;
-    replaceCard(await res.json());
+  if (editing) {
+    body.column_id = Number(fColumn.value);
+    if (fAssignee.value !== fAssignee.dataset.original) {
+      body.assignee_id = fAssignee.value ? Number(fAssignee.value) : null;
+    }
   } else {
-    const res = await fetch('/api/tasks', {
-      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
+    if (fAssignee.value) body.assignee_id = Number(fAssignee.value);
+    if (fDepartment.value) body.department_id = Number(fDepartment.value);
+  }
+
+  saveTaskBtn.disabled = true;
+  try {
+    const res = await fetch(editing ? `/api/tasks/${fId.value}` : '/api/tasks', {
+      method: editing ? 'PATCH' : 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
     });
-    if (!res.ok) return;
-    prependCard(await res.json());
+    if (!res.ok || res.redirected) {
+      const error = await res.json().catch(() => ({}));
+      taskError.textContent = error.error || T.taskSaveError;
+      return;
+    }
+    const task = await res.json();
+    if (!editing && task.board_id !== ACTIVE_BOARD_ID) {
+      if (task.can_open_board) location.href = `/?board_id=${task.board_id}`;
+      else {
+        taskModal.close();
+        showToast(T.taskRouted, 'success');
+      }
+      return;
+    }
+    taskModal.close();
+    if (editing) {
+      replaceCard(task)?.querySelector('.card-title').focus({preventScroll: true});
+    } else {
+      prependCard(task);
+      updateCounts();
+    }
+  } catch {
+    taskError.textContent = T.taskSaveError;
+  } finally {
+    saveTaskBtn.disabled = false;
   }
-  closeTaskModal();
-  updateCounts();
 });
 
-/* ── Quick-add ─────────────────────────────────────────────────────────────── */
-document.addEventListener('click', e => {
-  const addBtn = e.target.closest('.col-add-card-btn');
-  if (addBtn) {
-    openTaskModal('new', { column_id: parseInt(addBtn.dataset.colId) });
-  }
-});
-
-/* ── Card edit / delete via delegation ────────────────────────────────────── */
+/* ── Card actions ─────────────────────────────────────────────────────────── */
+const taskDetails = $('#task-details');
 document.addEventListener('click', async e => {
-  const editBtn = e.target.closest('.btn-edit');
-  const delBtn  = e.target.closest('.btn-delete');
+  const card = e.target.closest('.card');
+  if (!card) return;
 
-  if (editBtn) {
-    const card = editBtn.closest('.card');
-    openTaskModal('edit', extractCardData(card));
-    return;
-  }
-
-  if (delBtn) {
-    const card  = delBtn.closest('.card');
-    const id    = card.dataset.id;
+  if (e.target.closest('.btn-delete')) {
     showConfirm(T.confirmDelete, async () => {
-      const res = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/tasks/${card.dataset.id}`, { method: 'DELETE' });
       if (!res.ok) return;
       card.style.transition = 'opacity .15s, transform .15s';
       card.style.opacity    = '0';
       card.style.transform  = 'scale(.96)';
       setTimeout(() => { card.remove(); updateCounts(); }, 150);
     });
+    return;
   }
+
+  const task = extractCardData(card);
+  $('.card-title', card).focus({preventScroll: true});
+  if (!READONLY) {
+    openTaskModal(task);
+    return;
+  }
+  $('#task-details-title').textContent = task.title;
+  $('#task-details-description').textContent = task.description || T.noDescription;
+  $('#task-details-status').textContent = $('.column-title', card.closest('.column')).textContent;
+  $('#task-details-priority').textContent = T.prio[task.priority];
+  $('#task-details-deadline').textContent = task.deadline ? fmtDeadline(task.deadline) : T.noDeadline;
+  const tags = $$('.card-tags-row .tag-badge', card);
+  $('#task-details-tags-row').hidden = !tags.length;
+  $('#task-details-tags').replaceChildren(...tags.map(tag => tag.cloneNode(true)));
+  taskDetails.showModal();
+  taskDetails.scrollTop = 0;
 });
 
 function extractCardData(card) {
@@ -204,6 +278,8 @@ function extractCardData(card) {
     id:          card.dataset.id,
     title:       card.querySelector('.card-title')?.textContent.trim() || '',
     description: card.querySelector('.card-desc')?.textContent.trim()  || '',
+    sender:      card.querySelector('.card-sender strong')?.textContent,
+    assignee_id: card.dataset.assigneeId || '',
     column_id:   parseInt(card.dataset.colId),
     tag_ids:     tagIds,
     priority:    (() => {
@@ -231,6 +307,7 @@ function buildCardHTML(task) {
   const now = new Date().toISOString().slice(0,16).replace('T',' ');
   const overdue = dl && dl < now ? ' overdue' : '';
   const dlDisplay = dl ? fmtDeadline(dl) : '';
+  const assignee = ASSIGNEES[task.assignee_id];
 
   const tagsHTML = taskTags.length
     ? `<div class="card-tags-row">${taskTags.map(t =>
@@ -239,13 +316,15 @@ function buildCardHTML(task) {
     : '';
 
   return `
-    <div class="card" data-id="${task.id}" data-col-id="${task.column_id}" data-tag-ids="${esc(JSON.stringify(tagIds))}" data-deadline="${esc(dl||'')}" draggable="true">
+    <div class="card" data-id="${task.id}" data-col-id="${task.column_id}" data-tag-ids="${esc(JSON.stringify(tagIds))}" data-deadline="${esc(dl||'')}" data-assignee-id="${task.assignee_id ?? ''}" draggable="true">
       <div class="card-prio-bar prio-${esc(prio)}"></div>
       <div class="card-inner">
         ${tagsHTML}
-        <p class="card-title">${esc(task.title)}</p>
+        <button type="button" class="card-title" aria-haspopup="dialog">${esc(task.title)}</button>
         ${task.description ? `<p class="card-desc">${esc(task.description)}</p>` : ''}
+        ${task.sender_name ? `<p class="card-sender">${esc(T.taskFrom)} <strong>${esc(task.sender_name)}</strong></p>` : ''}
         <div class="card-meta-row">
+          ${assignee ? `<span class="card-assignee">${esc(T.taskTo)} @${esc(assignee)}</span>` : ''}
           ${dl ? `<span class="card-deadline${overdue}"><svg width="11" height="11" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>${esc(dlDisplay)}</span>` : ''}
           <span class="prio-badge prio-badge-${esc(prio)}">${esc(prioLabel)}</span>
         </div>
@@ -273,13 +352,13 @@ function replaceCard(task) {
   const newCard = temp.firstElementChild;
   if (old.dataset.colId !== String(task.column_id) && targetList) {
     old.remove();
-    targetList.insertAdjacentHTML('afterbegin', buildCardHTML(task));
-    initDrag(targetList.firstElementChild);
+    targetList.prepend(newCard);
   } else {
     old.replaceWith(newCard);
-    initDrag(newCard);
   }
+  initDrag(newCard);
   updateCounts();
+  return newCard;
 }
 
 /* ── Drag & Drop ───────────────────────────────────────────────────────────── */
@@ -293,7 +372,7 @@ function initDrag(card) {
   card.addEventListener('dragend',   onDragEnd);
 }
 
-$$('.card').forEach(initDrag);
+$$('.card[draggable="true"]').forEach(initDrag);
 
 function onDragStart(e) {
   draggedCard = this;
@@ -311,8 +390,9 @@ function onDragEnd() {
   $$('.cards-list').forEach(l => l.classList.remove('drag-over'));
 }
 
-$$('.cards-list').forEach(list => {
+function initCardDrop(list) {
   list.addEventListener('dragover', e => {
+    if (!draggedCard || !placeholder) return;
     e.preventDefault();
     list.classList.add('drag-over');
     const after = getDragAfterElement(list, e.clientY);
@@ -320,12 +400,12 @@ $$('.cards-list').forEach(list => {
   });
   list.addEventListener('dragleave', () => list.classList.remove('drag-over'));
   list.addEventListener('drop', async e => {
+    if (!draggedCard) return;
     e.preventDefault();
     list.classList.remove('drag-over');
-    if (!draggedCard) return;
     const newColId = parseInt(list.dataset.colId);
     const taskId   = draggedCard.dataset.id;
-    list.insertBefore(draggedCard, placeholder);
+    list.insertBefore(draggedCard, placeholder?.parentElement === list ? placeholder : null);
     placeholder?.remove();
     draggedCard.dataset.colId = newColId;
     await fetch(`/api/tasks/${taskId}`, {
@@ -334,7 +414,9 @@ $$('.cards-list').forEach(list => {
     });
     updateCounts();
   });
-});
+}
+
+if (!READONLY) $$('.cards-list').forEach(initCardDrop);
 
 function getDragAfterElement(container, y) {
   return $$('.card:not(.dragging)', container).reduce((closest, child) => {
@@ -343,6 +425,137 @@ function getDragAfterElement(container, y) {
     return (offset < 0 && offset > closest.offset) ? { offset, element: child } : closest;
   }, { offset: Number.NEGATIVE_INFINITY }).element;
 }
+
+/* ── Column order ──────────────────────────────────────────────────────────── */
+const columnBoard = $('#board');
+const columnScroller = columnBoard.parentElement;
+const addColumnPlaceholder = $('#add-column-btn-col');
+let columnDrag = null;
+let savingColumnOrder = false;
+
+function boardColumns() {
+  return $$('.column[data-col-id]', columnBoard);
+}
+
+async function saveColumnMove(column, before) {
+  if (savingColumnOrder) return;
+  const columns = boardColumns();
+  const reordered = columns.filter(item => item !== column);
+  const index = before ? reordered.indexOf(before) : reordered.length;
+  if (index < 0 || columns.indexOf(column) === index) return;
+  reordered.splice(index, 0, column);
+  const columnIds = reordered.map(item => Number(item.dataset.colId));
+
+  savingColumnOrder = true;
+  try {
+    const response = await fetch(`/api/boards/${ACTIVE_BOARD_ID}/columns/order`, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        previous_column_ids: columns.map(item => Number(item.dataset.colId)),
+        column_ids: columnIds,
+      }),
+    });
+    if (!response.ok || response.redirected) {
+      showToast(response.status === 409 ? T.columnOrderConflict : T.columnOrderError, 'error');
+      return;
+    }
+
+    const active = document.activeElement;
+    columnBoard.insertBefore(column, before || addColumnPlaceholder);
+    if (column.contains(active)) active.focus({preventScroll: true});
+    column.scrollIntoView({block: 'nearest', inline: 'nearest'});
+
+    const positions = new Map(columnIds.map((id, position) => [id, position]));
+    COLUMNS_DATA.sort((a, b) => positions.get(a.id) - positions.get(b.id));
+    COLUMNS_DATA.forEach(item => { item.position = positions.get(item.id); });
+    const selected = fColumn.value;
+    for (const id of columnIds) {
+      const option = fColumn.querySelector(`option[value="${id}"]`);
+      if (option) fColumn.appendChild(option);
+    }
+    fColumn.value = selected;
+  } catch {
+    showToast(T.columnOrderError, 'error');
+  } finally {
+    savingColumnOrder = false;
+  }
+}
+
+function markColumnTarget() {
+  const {column, x} = columnDrag;
+  const target = boardColumns().find(item => {
+    if (item === column) return false;
+    const box = item.getBoundingClientRect();
+    return x < box.left + box.width / 2;
+  }) || addColumnPlaceholder;
+  if (target === columnDrag.target) return;
+  columnDrag.target?.classList.remove('column-drop-before');
+  target.classList.add('column-drop-before');
+  columnDrag.target = target;
+}
+
+function scrollColumnDrag() {
+  if (!columnDrag?.active) return;
+  const box = columnScroller.getBoundingClientRect();
+  const scroll = columnScroller.scrollLeft;
+  if (columnDrag.x < box.left + 44) columnScroller.scrollLeft -= 12;
+  if (columnDrag.x > box.right - 44) columnScroller.scrollLeft += 12;
+  if (columnScroller.scrollLeft !== scroll) markColumnTarget();
+  columnDrag.frame = requestAnimationFrame(scrollColumnDrag);
+}
+
+columnBoard.addEventListener('pointerdown', e => {
+  const handle = e.target.closest('.column-move-handle');
+  if (!handle || e.button !== 0 || columnDrag || savingColumnOrder || boardColumns().length < 2) return;
+  columnDrag = {pointerId: e.pointerId, column: handle.closest('.column'), startX: e.clientX};
+  handle.setPointerCapture(e.pointerId);
+});
+
+columnBoard.addEventListener('pointermove', e => {
+  if (columnDrag?.pointerId !== e.pointerId) return;
+  columnDrag.x = e.clientX;
+  if (!columnDrag.active) {
+    if (Math.abs(e.clientX - columnDrag.startX) < 6) return;
+    columnDrag.active = true;
+    columnDrag.column.classList.add('column-moving');
+    columnDrag.frame = requestAnimationFrame(scrollColumnDrag);
+  }
+  markColumnTarget();
+});
+
+function finishColumnDrag(e) {
+  if (columnDrag?.pointerId !== e.pointerId) return;
+  const {column, active, target, frame} = columnDrag;
+  columnDrag = null;
+  cancelAnimationFrame(frame);
+  column.classList.remove('column-moving');
+  target?.classList.remove('column-drop-before');
+  const box = columnScroller.getBoundingClientRect();
+  if (active && e.type === 'pointerup' &&
+      e.clientX >= box.left && e.clientX <= box.right &&
+      e.clientY >= box.top && e.clientY <= box.bottom) {
+    saveColumnMove(column, target === addColumnPlaceholder ? null : target);
+  }
+}
+
+['pointerup', 'pointercancel', 'lostpointercapture'].forEach(type => {
+  columnBoard.addEventListener(type, finishColumnDrag);
+});
+
+columnBoard.addEventListener('keydown', e => {
+  const handle = e.target.closest('.column-move-handle');
+  if (!handle || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+  e.preventDefault();
+  if (savingColumnOrder || columnDrag) return;
+  const column = handle.closest('.column');
+  const columns = boardColumns();
+  const index = columns.indexOf(column);
+  const direction = e.key === 'ArrowLeft' ? -1 : 1;
+  const next = index + direction;
+  if (next < 0 || next >= columns.length) return;
+  saveColumnMove(column, direction < 0 ? columns[next] : (columns[next + 1] || null));
+});
 
 /* ── Update counts ─────────────────────────────────────────────────────────── */
 function updateCounts() {
@@ -407,13 +620,19 @@ document.addEventListener('click', async e => {
   if (!delBtn) return;
   const id = delBtn.dataset.id;
   showConfirm(T.confirmDelCol, async () => {
-    const res = await fetch(`/api/columns/${id}`, { method: 'DELETE' });
-    if (!res.ok) { showToast((await res.json()).error, 'error'); return; }
-    const col = $(`#column-${id}`);
-    if (col) col.remove();
-    fColumn.querySelector(`option[value="${id}"]`)?.remove();
-    const idx = COLUMNS_DATA.findIndex(c => c.id === parseInt(id));
-    if (idx !== -1) COLUMNS_DATA.splice(idx, 1);
+    if (savingColumnOrder || columnDrag) return;
+    savingColumnOrder = true;
+    try {
+      const res = await fetch(`/api/columns/${id}`, { method: 'DELETE' });
+      if (!res.ok) { showToast((await res.json()).error, 'error'); return; }
+      const col = $(`#column-${id}`);
+      if (col) col.remove();
+      fColumn.querySelector(`option[value="${id}"]`)?.remove();
+      const idx = COLUMNS_DATA.findIndex(c => c.id === parseInt(id));
+      if (idx !== -1) COLUMNS_DATA.splice(idx, 1);
+    } finally {
+      savingColumnOrder = false;
+    }
   });
 });
 
@@ -441,33 +660,32 @@ $('#add-col-modal-save')?.addEventListener('click', async () => {
 });
 
 async function createColumn(name) {
-  const res = await fetch(`/api/boards/${ACTIVE_BOARD_ID}/columns`, {
-    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }),
-  });
-  if (!res.ok) return;
-  const col = await res.json();
-  COLUMNS_DATA.push(col);
+  if (savingColumnOrder || columnDrag) return;
+  savingColumnOrder = true;
+  try {
+    const res = await fetch(`/api/boards/${ACTIVE_BOARD_ID}/columns`, {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }),
+    });
+    if (!res.ok) return;
+    const col = await res.json();
+    COLUMNS_DATA.push(col);
 
-  // insert before phantom column
-  const phantom = $('#add-column-btn-col');
-  phantom.insertAdjacentHTML('beforebegin', buildColumnHTML(col));
-  initColumnDrag($(`#column-${col.id}`));
-
-  // add option to modal select
-  const opt = document.createElement('option');
-  opt.value       = col.id;
-  opt.textContent = col.name;
-  fColumn.appendChild(opt);
+    addColumnPlaceholder.insertAdjacentHTML('beforebegin', buildColumnHTML(col));
+    initCardDrop($(`#col-${col.id}`));
+    fColumn.appendChild(new Option(col.name, col.id));
+  } finally {
+    savingColumnOrder = false;
+  }
 }
 
 function buildColumnHTML(col) {
   const renLabel = LANG === 'ru' ? 'Переименовать' : 'Rename';
   const delLabel = LANG === 'ru' ? 'Удалить столбец' : 'Delete column';
-  const addLabel = LANG === 'ru' ? 'Добавить задачу' : 'Add task';
   return `
     <div class="column" data-col-id="${col.id}" id="column-${col.id}">
       <div class="column-header">
         <div class="column-header-left">
+          ${COLUMN_MOVE_HANDLE}
           <span class="column-title" data-col-id="${col.id}">${esc(col.name)}</span>
           <span class="column-count badge">0</span>
         </div>
@@ -478,44 +696,88 @@ function buildColumnHTML(col) {
           <button class="icon-btn col-delete-btn" data-id="${col.id}" title="${delLabel}">
             <svg width="12" height="12" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>
           </button>
-          <button class="icon-btn col-add-card-btn" data-col-id="${col.id}" title="${addLabel}">
-            <svg width="14" height="14" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2.5" stroke-linecap="round" d="M12 5v14M5 12h14"/></svg>
-          </button>
         </div>
       </div>
       <div class="cards-list" id="col-${col.id}" data-col-id="${col.id}"></div>
     </div>`;
 }
 
-function initColumnDrag(colEl) {
-  const list = colEl.querySelector('.cards-list');
-  if (!list) return;
-  list.addEventListener('dragover', e => {
-    e.preventDefault();
-    list.classList.add('drag-over');
-    const after = getDragAfterElement(list, e.clientY);
-    after ? list.insertBefore(placeholder, after) : list.appendChild(placeholder);
-  });
-  list.addEventListener('dragleave', () => list.classList.remove('drag-over'));
-  list.addEventListener('drop', async e => {
-    e.preventDefault();
-    list.classList.remove('drag-over');
-    if (!draggedCard) return;
-    const newColId = parseInt(list.dataset.colId);
-    list.insertBefore(draggedCard, placeholder);
-    placeholder?.remove();
-    draggedCard.dataset.colId = newColId;
-    await fetch(`/api/tasks/${draggedCard.dataset.id}`, {
-      method: 'PATCH', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ column_id: newColId }),
-    });
-    updateCounts();
-  });
-}
-
 $('#btn-add-column')?.addEventListener('click', showAddColumnUI);
 $('#btn-add-column-inline')?.addEventListener('click', showAddColumnUI);
-$('#btn-add-task-topbar')?.addEventListener('click', () => openTaskModal('new'));
+$('#btn-add-task-topbar')?.addEventListener('click', () => openTaskModal());
+
+/* ── Column templates ─────────────────────────────────────────────────────── */
+const templateModal = $('#column-template-modal');
+const boardTemplate = $('#board-template');
+
+if (templateModal) {
+  const select = $('#column-template-select');
+  const name = $('#column-template-name');
+  const names = $('#column-template-names');
+  const submit = $('#column-template-submit');
+
+  function renderTemplate() {
+    const custom = select.value === 'custom';
+    $('#column-template-name-row').hidden = !custom;
+    $('#column-template-note').hidden = custom;
+    $('#column-template-custom-note').hidden = !custom;
+    name.required = custom;
+    names.readOnly = !custom;
+    names.value = (custom ? COLUMNS_DATA.map(col => col.name) : COLUMN_TEMPLATES[select.value].columns).join('\n');
+    submit.textContent = custom ? T.saveTemplate : T.applyTemplate;
+  }
+
+  $('#btn-column-templates').addEventListener('click', () => {
+    closeAddColModal();
+    renderTemplate();
+    templateModal.style.display = 'flex';
+    select.focus();
+  });
+  select.addEventListener('change', renderTemplate);
+  $('#column-template-close').addEventListener('click', () => {
+    templateModal.style.display = 'none';
+    $('#btn-add-column').focus();
+  });
+  templateModal.addEventListener('click', event => {
+    if (event.target === templateModal) $('#column-template-close').click();
+  });
+
+  $('#column-template-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const custom = select.value === 'custom';
+    if (submit.disabled || savingColumnOrder || columnDrag) return;
+    const body = custom
+      ? {name: name.value.trim(), columns: names.value.split('\n').map(col => col.trim()).filter(Boolean)}
+      : {template_id: select.value};
+    submit.disabled = true;
+    select.disabled = true;
+    try {
+      const response = await fetch(custom ? '/api/column-templates' : `/api/boards/${ACTIVE_BOARD_ID}/column-template`, {
+        method: custom ? 'POST' : 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
+      });
+      if (response.redirected) throw new Error();
+      const data = await response.json();
+      if (!response.ok) {
+        showToast({invalid_template: T.templateInvalid, template_name_taken: T.templateNameTaken}[data.error] || T.templateError, 'error');
+      } else if (custom) {
+        COLUMN_TEMPLATES[data.id] = data;
+        select.add(new Option(data.name, data.id), select.options.length - 1);
+        boardTemplate.add(new Option(data.name, data.id));
+        select.value = data.id;
+        name.value = '';
+        renderTemplate();
+        showToast(T.templateSaved, 'success');
+      } else {
+        location.href = `/?board_id=${ACTIVE_BOARD_ID}`;
+      }
+    } catch {
+      showToast(T.templateError, 'error');
+    } finally {
+      submit.disabled = false;
+      select.disabled = false;
+    }
+  });
+}
 
 /* ── Board modal ───────────────────────────────────────────────────────────── */
 const boardModal      = $('#board-modal');
@@ -532,6 +794,8 @@ function openBoardModal(mode, data = {}) {
   boardModalId.value   = data.id    || '';
   boardNameInput.value = data.name  || '';
   boardColorVal.value  = data.color || '#5b6af0';
+  boardTemplate.value = '';
+  $('#board-template-row').style.display = mode === 'edit' ? 'none' : '';
   boardDeleteRow.style.display = mode === 'edit' ? 'block' : 'none';
   // update swatches
   $$('.color-swatch').forEach(s => s.classList.toggle('selected', s.dataset.color === boardColorVal.value));
@@ -583,9 +847,9 @@ $('#board-modal-save')?.addEventListener('click', async () => {
   } else {
     const res = await fetch('/api/boards', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ name, color }),
+      body: JSON.stringify({ name, color, template_id: boardTemplate.value }),
     });
-    if (!res.ok) return;
+    if (!res.ok) { showToast(T.templateError, 'error'); return; }
     const board = await res.json();
     location.href = `/?board_id=${board.id}`;
   }
@@ -674,15 +938,11 @@ function applyTagFilter() {
   });
 
   // update filter chip in topbar
-  if (activeFilterTagId) {
-    const tag = TAGS.find(t => t.id === activeFilterTagId);
-    if (tag) {
-      filterChipDot.style.background = tag.color;
-      filterChipName.textContent = tag.name;
-      filterChip.style.display = '';
-    }
-  } else {
-    filterChip.style.display = 'none';
+  const tag = TAGS.find(t => t.id === activeFilterTagId);
+  filterChip.hidden = !tag;
+  if (tag) {
+    filterChipDot.style.background = tag.color;
+    filterChipName.textContent = tag.name;
   }
 
   // show/hide cards
@@ -706,11 +966,12 @@ $('#filter-chip-clear')?.addEventListener('click', () => {
 
 /* ── ESC ───────────────────────────────────────────────────────────────────── */
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') {
-    closeTaskModal();
+  if (e.key === 'Escape' && !taskModal?.open && !taskDetails?.open) {
+    if (drawerLayout.matches && !sidebar.inert) setSidebar(false);
     closeBoardModal();
     closeColModal();
     closeAddColModal();
+    if (templateModal?.style.display === 'flex') $('#column-template-close').click();
     closeConfirm();
   }
 });
@@ -727,6 +988,8 @@ if (typeof IS_OWNER !== 'undefined' && IS_OWNER && !READONLY) {
   const shareLinkRow   = $('#share-link-row');
   const shareLinkInput = $('#share-link-input');
   const membersList    = $('#members-list');
+  const departmentLead = $('#department-lead');
+  const departmentStaff = $('#department-staff');
 
   function openShareModal()  { shareModal.style.display = 'flex'; }
   function closeShareModal() { shareModal.style.display = 'none'; }
@@ -783,6 +1046,11 @@ if (typeof IS_OWNER !== 'undefined' && IS_OWNER && !READONLY) {
     row.dataset.userId = member.user_id;
     row.innerHTML = `<span class="member-name">@${esc(member.username || 'user')}</span><button class="btn-ghost btn-sm member-remove-btn" data-user-id="${member.user_id}">${LANG === 'ru' ? 'Удалить' : 'Remove'}</button>`;
     membersList.appendChild(row);
+    const usernameLabel = member.username || `#${member.user_id}`;
+    ASSIGNEES[member.user_id] = usernameLabel;
+    const label = `@${usernameLabel}`;
+    departmentLead.add(new Option(label, member.user_id));
+    departmentStaff.insertAdjacentHTML('beforeend', `<label class="department-staff-item"><input type="checkbox" name="staff_ids" value="${member.user_id}"/><span>${esc(label)}</span></label>`);
     input.value = '';
     showToast(LANG === 'ru' ? 'Участник добавлен' : 'Member added', 'success');
   });
@@ -794,7 +1062,19 @@ if (typeof IS_OWNER !== 'undefined' && IS_OWNER && !READONLY) {
     const userId = btn.dataset.userId;
     const res = await fetch(`/api/boards/${ACTIVE_BOARD_ID}/members/${userId}`, { method: 'DELETE' });
     if (!res.ok) return;
+    if (departmentLead.dataset.saved === userId) {
+      location.reload();
+      return;
+    }
     btn.closest('.member-row').remove();
+    delete ASSIGNEES[userId];
+    delete DEPARTMENTS[ACTIVE_BOARD_ID]?.staff[userId];
+    departmentLead.querySelector(`option[value="${userId}"]`)?.remove();
+    departmentStaff.querySelector(`input[value="${userId}"]`)?.closest('label').remove();
+    $$(`.card[data-assignee-id="${userId}"]`).forEach(card => {
+      card.dataset.assigneeId = '';
+      card.querySelector('.card-assignee')?.remove();
+    });
     if (!membersList.querySelector('.member-row')) {
       const empty = document.createElement('p');
       empty.className = 'share-empty';
@@ -803,6 +1083,25 @@ if (typeof IS_OWNER !== 'undefined' && IS_OWNER && !READONLY) {
       membersList.appendChild(empty);
     }
     showToast(LANG === 'ru' ? 'Участник удалён' : 'Member removed', 'success');
+  });
+
+  $('#department-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const button = event.submitter;
+    button.disabled = true;
+    try {
+      const response = await fetch(`/api/boards/${ACTIVE_BOARD_ID}/department`, {
+        method: 'PUT', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({lead_id: departmentLead.value ? Number(departmentLead.value) : null, staff_ids: form.getAll('staff_ids').map(Number)}),
+      });
+      if (!response.ok || response.redirected) throw new Error();
+      location.reload();
+    } catch {
+      showToast(T.departmentError, 'error');
+    } finally {
+      button.disabled = false;
+    }
   });
 
   // ESC for share modal

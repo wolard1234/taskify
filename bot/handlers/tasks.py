@@ -1,4 +1,5 @@
 import sys, os
+from html import escape
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 from aiogram import Router, F
@@ -9,9 +10,10 @@ from aiogram.types import (
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from bot.handlers.start import back_to_menu_kb
 from database.db import (
     get_or_create_user, get_or_create_default_board,
-    get_tasks_by_status_bot, get_all_tasks_for_user,
+    get_all_tasks_for_user,
     add_task, get_columns, move_task, delete_task, get_stats, get_task,
     get_boards, get_tags, set_task_tags,
 )
@@ -56,11 +58,6 @@ class AddTask(StatesGroup):
 
 
 # ── Keyboards ─────────────────────────────────────────────────────────────────
-def main_menu_kb() -> InlineKeyboardMarkup:
-    from bot.handlers.start import main_menu_kb as _mk
-    return _mk()
-
-
 def prio_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -96,7 +93,7 @@ def tags_kb(user_id: int, selected_ids: list[int] = None) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def task_actions_kb(task_id: int, current_col_key: str) -> InlineKeyboardMarkup:
+def task_actions_kb(task_id: int, current_col_key: str, can_delete: bool) -> InlineKeyboardMarkup:
     """Buttons: move to doing / done / delete, depending on current column key."""
     rows = []
     if current_col_key != "in_progress":
@@ -106,24 +103,19 @@ def task_actions_kb(task_id: int, current_col_key: str) -> InlineKeyboardMarkup:
     kb = []
     if rows:
         kb.append(rows)
-    kb.append([
-        InlineKeyboardButton(text="🗑 Удалить",    callback_data=f"task:delete:{task_id}"),
-        InlineKeyboardButton(text="◀️ Назад",      callback_data="menu:list"),
-    ])
+    footer = []
+    if can_delete:
+        footer.append(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"task:delete:{task_id}"))
+    footer.append(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:list"))
+    kb.append(footer)
     return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-def back_to_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu:main")]
-    ])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _fmt_short(t: dict) -> str:
     prio = PRIO_LABELS.get(t.get("priority", "medium"), "")
     dl   = f" 📅 {_fmt_dl_display(t['deadline'])}" if t.get("deadline") else ""
-    return f"<code>#{t['id']}</code> <b>{t['title']}</b> {prio}{dl}"
+    return f"<code>#{t['id']}</code> <b>{escape(t['title'])}</b> {prio}{dl}"
 
 
 def _fmt_full(t: dict) -> str:
@@ -131,10 +123,28 @@ def _fmt_full(t: dict) -> str:
     tags = t.get("tags", [])
     tag_str = ""
     if tags:
-        tag_str = "\n🏷 " + ", ".join(tg["name"] for tg in tags)
+        tag_str = "\n🏷 " + ", ".join(escape(tg["name"]) for tg in tags)
     dl   = f"\n📅 {_fmt_dl_display(t['deadline'])}" if t.get("deadline") else ""
-    col  = f"\n📂 {t['col_name']}"  if t.get("col_name") else ""
-    return f"<code>#{t['id']}</code> <b>{t['title']}</b>\n{prio}{tag_str}{dl}{col}"
+    col  = f"\n📂 {escape(t['col_name'])}" if t.get("col_name") else ""
+    return f"<code>#{t['id']}</code> <b>{escape(t['title'])}</b>\n{prio}{tag_str}{dl}{col}"
+
+
+def active_tasks(user_id: int) -> list[dict]:
+    tasks = (task for task in get_all_tasks_for_user(user_id) if task["col_key"] != "done")
+    return sorted(tasks, key=lambda task: {"todo": 0, "in_progress": 1}.get(task["col_key"], 2))
+
+
+def format_active_tasks(tasks: list[dict]) -> str:
+    groups = {}
+    for task in tasks:
+        heading = {
+            "todo": "📋 К выполнению",
+            "in_progress": "⚙️ В процессе",
+        }.get(task["col_key"], task["col_name"] or "Без столбца")
+        groups.setdefault(heading, []).append(_fmt_short(task))
+    return "\n\n".join(
+        "\n".join([f"<b>{escape(heading)}:</b>", *lines]) for heading, lines in groups.items()
+    )
 
 
 def _parse_add(text: str):
@@ -207,16 +217,6 @@ async def cmd_add(message: Message, state: FSMContext):
 
 
 # ── Menu callbacks ─────────────────────────────────────────────────────────────
-@router.callback_query(F.data == "menu:main")
-async def cb_menu_main(call: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await call.message.edit_text(
-        "Выбери действие:",
-        reply_markup=main_menu_kb(),
-    )
-    await call.answer()
-
-
 @router.callback_query(F.data == "menu:add")
 async def cb_menu_add(call: CallbackQuery, state: FSMContext):
     user   = get_or_create_user(call.from_user.id, call.from_user.username or "")
@@ -262,10 +262,9 @@ async def cb_menu_add(call: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "menu:list")
 async def cb_menu_list(call: CallbackQuery):
     user = get_or_create_user(call.from_user.id, call.from_user.username or "")
-    todo = get_tasks_by_status_bot(user["id"], "todo")
-    wip  = get_tasks_by_status_bot(user["id"], "in_progress")
+    tasks = active_tasks(user["id"])
 
-    if not todo and not wip:
+    if not tasks:
         await call.message.edit_text(
             "Нет активных задач. Добавь первую!",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -276,25 +275,14 @@ async def cb_menu_list(call: CallbackQuery):
         await call.answer()
         return
 
-    lines = []
-    if todo:
-        lines.append("<b>📋 К выполнению:</b>")
-        lines += [_fmt_short(t) for t in todo]
-    if wip:
-        if lines: lines.append("")
-        lines.append("<b>⚙️ В процессе:</b>")
-        lines += [_fmt_short(t) for t in wip]
-
-    # build per-task action buttons (up to 5 tasks)
-    all_tasks = (todo + wip)[:8]
     kb_rows = [[InlineKeyboardButton(
         text=f"#{t['id']} {t['title'][:22]}",
         callback_data=f"task:view:{t['id']}"
-    )] for t in all_tasks]
+    )] for t in tasks[:8]]
     kb_rows.append([InlineKeyboardButton(text="◀️ Меню", callback_data="menu:main")])
 
     await call.message.edit_text(
-        "\n".join(lines),
+        format_active_tasks(tasks),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
     )
@@ -320,7 +308,7 @@ async def cb_menu_all(call: CallbackQuery):
 
     lines = []
     for bname, btasks in boards_map.items():
-        lines.append(f"\n<b>📋 {bname}:</b>")
+        lines.append(f"\n<b>📋 {escape(bname)}:</b>")
         lines += [_fmt_short(t) for t in btasks]
 
     await call.message.edit_text(
@@ -354,7 +342,7 @@ async def cb_menu_web(call: CallbackQuery):
     login_url = f"{web_url}/login?token={token}"
     # Send as a new message so the link is always delivered
     await call.message.answer(
-        f"🌐 <b>Веб-панель Taskify</b>\n\n"
+        f"🌐 <b>Веб-панель ЦККО</b>\n\n"
         f'<a href="{login_url}">{login_url}</a>\n\n'
         "<i>Ссылка привязана к твоему аккаунту. Не передавай её другим.</i>",
         parse_mode="HTML",
@@ -381,49 +369,37 @@ async def cb_task_view(call: CallbackQuery):
     await call.message.edit_text(
         _fmt_full(task),
         parse_mode="HTML",
-        reply_markup=task_actions_kb(task_id, col_key),
+        reply_markup=task_actions_kb(task_id, col_key, task["user_id"] == user["id"]),
     )
     await call.answer()
 
 
 @router.callback_query(F.data.startswith("task:doing:"))
-async def cb_task_doing(call: CallbackQuery):
-    user    = get_or_create_user(call.from_user.id, call.from_user.username or "")
-    task_id = int(call.data.split(":")[2])
-    task    = get_task(task_id, user["id"])
-    if not task:
-        await call.answer("Задача не найдена.", show_alert=True)
-        return
-    cols    = get_columns(task["board_id"])
-    wip_col = next((c for c in cols if c.get("key") == "in_progress"), cols[1] if len(cols) > 1 else cols[0])
-    move_task(task_id, user["id"], wip_col["id"])
-    await call.answer("⚙️ Переведено в «В процессе»")
-    # refresh view
-    task = get_task(task_id, user["id"])
-    await call.message.edit_text(
-        _fmt_full(task),
-        parse_mode="HTML",
-        reply_markup=task_actions_kb(task_id, "in_progress"),
-    )
-
-
 @router.callback_query(F.data.startswith("task:done:"))
-async def cb_task_done(call: CallbackQuery):
-    user    = get_or_create_user(call.from_user.id, call.from_user.username or "")
-    task_id = int(call.data.split(":")[2])
-    task    = get_task(task_id, user["id"])
+async def cb_task_move(call: CallbackQuery):
+    user = get_or_create_user(call.from_user.id, call.from_user.username or "")
+    _, action, raw_task_id = call.data.split(":")
+    task_id = int(raw_task_id)
+    task = get_task(task_id, user["id"])
     if not task:
         await call.answer("Задача не найдена.", show_alert=True)
         return
-    cols     = get_columns(task["board_id"])
-    done_col = next((c for c in cols if c.get("key") == "done"), cols[-1])
-    move_task(task_id, user["id"], done_col["id"])
-    await call.answer("✅ Отмечено как выполнено!")
-    task = get_task(task_id, user["id"])
+    columns = get_columns(task["board_id"])
+    if not columns:
+        await call.answer("Столбцы задачи недоступны.", show_alert=True)
+        return
+    key = "done" if action == "done" else "in_progress"
+    fallback = columns[-1] if action == "done" else columns[min(1, len(columns) - 1)]
+    column = next((column for column in columns if column["key"] == key), fallback)
+    if not move_task(task_id, user["id"], column["id"]):
+        await call.answer("Задача больше недоступна.", show_alert=True)
+        return
+    task["col_name"] = column["name"]
+    await call.answer(f"Задача перемещена в «{column['name']}»")
     await call.message.edit_text(
         _fmt_full(task),
         parse_mode="HTML",
-        reply_markup=task_actions_kb(task_id, "done"),
+        reply_markup=task_actions_kb(task_id, key, task["user_id"] == user["id"]),
     )
 
 
@@ -440,6 +416,7 @@ async def cb_task_delete(call: CallbackQuery):
         )
     else:
         await call.answer("Задача не найдена.", show_alert=True)
+        return
     await call.answer()
 
 
@@ -647,20 +624,11 @@ async def _finish_add(msg, state: FSMContext, deadline, tag_ids: list[int] = Non
 @router.message(Command("list"))
 async def cmd_list(message: Message):
     user = get_or_create_user(message.from_user.id, message.from_user.username or "")
-    todo = get_tasks_by_status_bot(user["id"], "todo")
-    wip  = get_tasks_by_status_bot(user["id"], "in_progress")
-    if not todo and not wip:
+    tasks = active_tasks(user["id"])
+    if not tasks:
         await message.answer("Нет активных задач.", reply_markup=back_to_menu_kb())
         return
-    lines = []
-    if todo:
-        lines.append("<b>📋 К выполнению:</b>")
-        lines += [_fmt_short(t) for t in todo]
-    if wip:
-        if lines: lines.append("")
-        lines.append("<b>⚙️ В процессе:</b>")
-        lines += [_fmt_short(t) for t in wip]
-    await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=back_to_menu_kb())
+    await message.answer(format_active_tasks(tasks), parse_mode="HTML", reply_markup=back_to_menu_kb())
 
 
 @router.message(Command("stats"))
@@ -685,7 +653,7 @@ async def cmd_web(message: Message):
     token   = str(message.from_user.id)
     login_url = f"{web_url}/login?token={token}"
     await message.answer(
-        f"🌐 <b>Веб-панель:</b>\n"
+        f"🌐 <b>Веб-панель ЦККО</b>\n"
         f"{login_url}\n\n"
         "<i>Не передавай ссылку другим.</i>",
         parse_mode="HTML",

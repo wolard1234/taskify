@@ -57,7 +57,9 @@ All features are free. No premium tiers, no paywalls.
 
 ## Telegram Bot
 
-The bot uses inline keyboard buttons for navigation. Send `/start` to get the main menu:
+In a private chat, send `/start`, choose a department, and enter your full name. Commands and menu buttons are available after registration. Existing users complete the profile once without losing tasks or board access. The list includes boards with a configured department lead; selecting a department does not grant board access.
+
+Employees use their task menu. Department leads also see their departments’ task counts; bot administrators see counts for all departments. Lead roles come from board settings, not registration. Set `ADMIN_TELEGRAM_IDS` to grant the bot administrator role.
 
 | Button | Action |
 |---|---|
@@ -66,6 +68,7 @@ The bot uses inline keyboard buttons for navigation. Send `/start` to get the ma
 | All tasks | View all tasks grouped by board |
 | Stats | Task counts by status |
 | Web panel | Get a personal login link |
+| My profile | See your full name, department, and role |
 
 Text shortcuts still work: `/add`, `/list`, `/stats`, `/web`.
 
@@ -79,7 +82,9 @@ A modern kanban board with a dark sidebar and light content area.
 
 - **Sidebar** -- boards list, shared boards, tags (click to filter), language switch, user info
 - **Topbar** -- board name, task counts per board, active tag filter chip, Share / +Task / +Column buttons
-- **Board** -- draggable cards across custom columns
+- **Board** -- draggable cards across custom columns. Open a card to view and edit its details. Public boards remain read-only.
+- **Column templates** -- choose Agile or a saved personal template for a new board, or apply one from an owned board's column dialog. Applying preserves tasks and keeps unmatched columns that contain tasks.
+- **Department routing** -- owners configure a department lead and staff under Share. For new tasks, choose a department, then a member of that department, or leave the lead selected for delegation. Choose Me to self-assign. Tasks start in To Do automatically. Routing within the same owner’s team does not grant access to the target board.
 - **Multi-tag** -- assign multiple tags per task, shown as colored badges on cards
 - **Tag filter** -- click a tag in the sidebar to show only matching cards; topbar chip shows active filter
 - **Board sharing**:
@@ -162,7 +167,8 @@ docker compose up --build --wait
 Open [the local board](http://localhost:5000/dev-login). If port 5000 is busy,
 set `PORT=5050` and `WEB_URL=http://localhost:5050` in `.env` and use port 5050.
 
-To run the Telegram bot, set `BOT_TOKEN` in `.env` and start the `telegram` profile.
+To run the Telegram bot, set `BOT_TOKEN` and `BOT_USERNAME` in `.env` and
+start the `telegram` profile.
 
 ```bash
 docker compose --profile telegram up --build -d
@@ -201,8 +207,10 @@ All settings are in the `.env` file:
 | Variable | Description | Default |
 |---|---|---|
 | `BOT_TOKEN` | Telegram bot token from [@BotFather](https://t.me/BotFather) | *required* |
+| `BOT_USERNAME` | Bot username shown on the login page and in daily digests | `taskifyjobs_bot` |
 | `FLASK_SECRET` | Secret key for Flask sessions | `changeme` |
 | `ADMIN_TOKEN` | Password for `/admin?token=...` panel | `admin` |
+| `ADMIN_TELEGRAM_IDS` | Comma-separated Telegram user IDs with the bot administrator role | empty |
 | `WEB_URL` | Public URL of the web panel | `http://localhost:5000` |
 | `FLASK_DEBUG` | Enable dev login at `/dev-login` | `false` |
 | `TASKIFY_DEV_LOGIN` | Enable `/dev-login` independently of Flask debug mode | `false` in Docker Compose |

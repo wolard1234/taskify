@@ -10,6 +10,7 @@ services:
     environment:
       TASKIFY_DB_PATH: /data/taskify.db
       BOT_TOKEN: ${BOT_TOKEN:-}
+      BOT_USERNAME: ${BOT_USERNAME:-}
       FLASK_SECRET: ${FLASK_SECRET:?Set FLASK_SECRET in .env}
       ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN in .env}
       WEB_URL: ${WEB_URL:-http://localhost:${PORT:-5000}}
@@ -30,6 +31,8 @@ services:
     environment:
       TASKIFY_DB_PATH: /data/taskify.db
       BOT_TOKEN: ${BOT_TOKEN:-}
+      BOT_USERNAME: ${BOT_USERNAME:-}
+      ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:-}
       WEB_URL: ${WEB_URL:-http://localhost:${PORT:-5000}}
       DIGEST_HOUR: ${DIGEST_HOUR:-9}
       TZ: ${TZ:-Europe/Moscow}

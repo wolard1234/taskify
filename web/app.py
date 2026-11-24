@@ -3,6 +3,7 @@ import sys
 import json
 import logging
 from datetime import datetime
+from html import escape
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 from urllib.parse import urlencode
@@ -26,14 +27,14 @@ from database.db import (
     toggle_share_token, get_board_by_share_token,
     get_board_members, add_board_member, remove_board_member,
     get_boards_shared_with_user, user_can_edit_board,
+    get_departments, update_department, InvalidDepartment,
     # columns
-    get_columns, add_column, update_column, delete_column,
+    get_columns, add_column, update_column, delete_column, reorder_columns,
+    get_column_templates, save_column_template, apply_column_template,
     # tags
     get_tags, add_tag, delete_tag,
-    # task-tags
-    set_task_tags,
     # tasks
-    get_tasks_by_column, add_task, update_task, delete_task, get_task,
+    get_tasks_by_column, add_task, update_task, delete_task, InvalidAssignee,
     # stats
     get_board_stats,
 )
@@ -73,6 +74,7 @@ BOARD_COLORS = [
 ]
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_USERNAME = (os.getenv("BOT_USERNAME") or "taskifyjobs_bot").lstrip("@")
 WEB_URL = os.getenv("WEB_URL", "http://localhost:5000").rstrip("/")
 
 
@@ -135,7 +137,7 @@ def login():
                 session["user_id"] = dict(row)["id"]
                 return redirect(next_url or url_for("board"))
         error = "Неверный токен. / Invalid token."
-    return render_template("login.html", error=error, lang=lang)
+    return render_template("login.html", error=error, lang=lang, bot_username=BOT_USERNAME)
 
 
 @app.route("/logout")
@@ -191,7 +193,14 @@ def board():
     tag_owner_id = active_board["user_id"] if not is_owner else user["id"]
     tags = get_tags(tag_owner_id)
     stats = get_board_stats(active_board["id"])
-    members = get_board_members(active_board["id"]) if is_owner else []
+    members = get_board_members(active_board["id"])
+    owner = user if is_owner else get_user_by_id(active_board["user_id"])
+    assignees = {owner["id"]: owner["username"] or f"#{owner['id']}"}
+    assignees.update({
+        member["user_id"]: member["username"] or f"#{member['user_id']}"
+        for member in members
+    })
+    departments = get_departments(active_board["user_id"], user["id"])
 
     return render_template(
         "board.html",
@@ -201,9 +210,12 @@ def board():
         active_board=active_board,
         is_owner=is_owner,
         columns=columns_data,
+        column_templates=get_column_templates(user["id"], lang),
         tags=tags,
         stats=stats,
-        members=members,
+        members=members if is_owner else [],
+        assignees=assignees,
+        departments=departments,
         lang=lang,
         priority_labels=PRIORITY_LABELS,
         board_colors=BOARD_COLORS,
@@ -232,12 +244,26 @@ def api_get_boards():
 @login_required
 def api_add_board():
     user = get_current_user()
-    data = request.get_json(silent=True) or {}
-    name = (data.get("name") or "").strip()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid board"}), 400
+    name = data.get("name")
+    name = name.strip() if isinstance(name, str) else ""
     if not name:
         return jsonify({"error": "Name required"}), 400
-    color = (data.get("color") or "#5b6af0").strip()
-    board = add_board(user["id"], name, color)
+    color = data.get("color", "#5b6af0")
+    if not isinstance(color, str):
+        return jsonify({"error": "Invalid board color"}), 400
+    template_id = data.get("template_id", "")
+    if not isinstance(template_id, str):
+        return jsonify({"error": "invalid_template"}), 400
+    columns = None
+    if template_id:
+        template = get_column_templates(user["id"], session.get("lang", "ru")).get(template_id)
+        if template is None:
+            return jsonify({"error": "template_not_found"}), 404
+        columns = template["columns"]
+    board = add_board(user["id"], name, color.strip() or "#5b6af0", columns=columns)
     return jsonify(board), 201
 
 
@@ -267,6 +293,47 @@ def api_delete_board(board_id):
 
 # ── Column API ────────────────────────────────────────────────────────────────
 
+@app.route("/api/column-templates", methods=["POST"])
+@login_required
+def api_save_column_template():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "invalid_template"}), 400
+    name, columns = data.get("name"), data.get("columns")
+    if not isinstance(name, str) or not isinstance(columns, list) or not all(isinstance(col, str) for col in columns):
+        return jsonify({"error": "invalid_template"}), 400
+    name = name.strip()
+    columns = [col.strip() for col in columns]
+    if (
+        not 1 <= len(name) <= 60 or len(name.splitlines()) != 1
+        or not 1 <= len(columns) <= 30
+        or any(not 1 <= len(col) <= 60 or len(col.splitlines()) != 1 for col in columns)
+        or len({col.casefold() for col in columns}) != len(columns)
+    ):
+        return jsonify({"error": "invalid_template"}), 400
+    if name.casefold() == "agile":
+        return jsonify({"error": "template_name_taken"}), 409
+    template_id = save_column_template(session["user_id"], name, columns)
+    if template_id is None:
+        return jsonify({"error": "template_name_taken"}), 409
+    return jsonify({"id": str(template_id), "name": name, "columns": columns}), 201
+
+
+@app.route("/api/boards/<int:board_id>/column-template", methods=["PUT"])
+@login_required
+def api_apply_column_template(board_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get("template_id"), str):
+        return jsonify({"error": "invalid_template"}), 400
+    user_id = session["user_id"]
+    template = get_column_templates(user_id, session.get("lang", "ru")).get(data["template_id"])
+    if template is None:
+        return jsonify({"error": "template_not_found"}), 404
+    if not apply_column_template(board_id, user_id, template["columns"]):
+        return jsonify({"error": "template_forbidden"}), 403
+    return jsonify({"ok": True})
+
+
 @app.route("/api/boards/<int:board_id>/columns", methods=["GET"])
 @login_required
 def api_get_columns(board_id):
@@ -288,6 +355,33 @@ def api_add_column(board_id):
         return jsonify({"error": "Name required"}), 400
     col = add_column(board_id, name)
     return jsonify(col), 201
+
+
+@app.route("/api/boards/<int:board_id>/columns/order", methods=["PUT"])
+@login_required
+def api_reorder_columns(board_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid column order"}), 400
+    previous_ids = data.get("previous_column_ids")
+    column_ids = data.get("column_ids")
+    for order in (previous_ids, column_ids):
+        if not isinstance(order, list) or not order or any(type(item) is not int or item <= 0 for item in order):
+            return jsonify({"error": "Invalid column order"}), 400
+    if (
+        len(previous_ids) != len(column_ids)
+        or len(set(previous_ids)) != len(previous_ids)
+        or set(previous_ids) != set(column_ids)
+    ):
+        return jsonify({"error": "Invalid column order"}), 400
+
+    try:
+        saved = reorder_columns(board_id, session["user_id"], previous_ids, column_ids)
+    except PermissionError:
+        return jsonify({"error": "Forbidden"}), 403
+    if not saved:
+        return jsonify({"error": "The board columns changed"}), 409
+    return jsonify({"column_ids": column_ids})
 
 
 @app.route("/api/columns/<int:col_id>", methods=["PATCH"])
@@ -323,35 +417,72 @@ def api_delete_column(col_id):
 
 # ── Task API ──────────────────────────────────────────────────────────────────
 
+def notify_task_assignee(task, actor, previous_assignee=None):
+    assignee_id = task["assignee_id"]
+    if assignee_id is None or assignee_id in (actor["id"], previous_assignee):
+        return
+    assignee = get_user_by_id(assignee_id)
+    if assignee and assignee["telegram_id"]:
+        actor_name = f"@{actor['username']}" if actor["username"] else f"пользователя #{actor['id']}"
+        notify_telegram(
+            assignee["telegram_id"],
+            f"📋 <b>Вам назначена задача</b>\n{escape(task['title'])}\n\nОт {escape(actor_name)}",
+            {"inline_keyboard": [[{
+                "text": "Открыть задачу",
+                "callback_data": f"task:view:{task['id']}",
+            }]]},
+        )
+
+
+def task_validation_error(error):
+    if session.get("lang", "ru") == "ru":
+        if isinstance(error, InvalidAssignee):
+            return jsonify({"error": "Выберите участника этой доски"}), 400
+        if isinstance(error, InvalidDepartment):
+            return jsonify({"error": "Отдел или исполнитель недоступен. Обновите страницу."}), 400
+    return jsonify({"error": str(error)}), 400
+
+
 @app.route("/api/tasks", methods=["POST"])
 @login_required
 def api_add_task():
     user = get_current_user()
-    data = request.get_json(silent=True) or {}
-    title = (data.get("title") or "").strip()
-    if not title:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid task"}), 400
+    title = data.get("title")
+    if not isinstance(title, str) or not title.strip():
         return jsonify({"error": "Title required"}), 400
 
-    board_id   = data.get("board_id") or session.get("active_board_id")
-    column_id  = data.get("column_id")
-    if not board_id or not column_id:
-        return jsonify({"error": "board_id and column_id required"}), 400
+    board_id = data.get("board_id", session.get("active_board_id"))
+    department_id = data.get("department_id")
+    column_id = data.get("column_id")
+    if type(board_id) is not int or not 0 < board_id <= 2**63 - 1:
+        return jsonify({"error": "Choose a board"}), 400
+    if department_id is not None and (type(department_id) is not int or not 0 < department_id <= 2**63 - 1):
+        return task_validation_error(InvalidDepartment("Department unavailable"))
+    if column_id is not None and (type(column_id) is not int or not 0 < column_id <= 2**63 - 1):
+        return jsonify({"error": "Choose a column on this board"}), 400
 
-    if not user_can_edit_board(board_id, user["id"]):
+    try:
+        task = add_task(
+            user_id=user["id"],
+            board_id=board_id,
+            column_id=column_id,
+            title=title.strip(),
+            description=(data.get("description") or "").strip(),
+            tag_ids=data.get("tag_ids") or [],
+            deadline=data.get("deadline") or None,
+            priority=data.get("priority", "medium"),
+            assignee_id=data.get("assignee_id"),
+            department_id=department_id,
+        )
+    except PermissionError:
         return jsonify({"error": "Forbidden"}), 403
-
-    tag_ids = data.get("tag_ids") or []
-
-    task = add_task(
-        user_id=user["id"],
-        board_id=board_id,
-        column_id=column_id,
-        title=title,
-        description=(data.get("description") or "").strip(),
-        tag_ids=tag_ids,
-        deadline=data.get("deadline") or None,
-        priority=data.get("priority", "medium"),
-    )
+    except ValueError as error:
+        return task_validation_error(error)
+    notify_task_assignee(task, user)
+    task["can_open_board"] = task["board_id"] == board_id or user_can_edit_board(task["board_id"], user["id"])
     return jsonify(task), 201
 
 
@@ -360,21 +491,14 @@ def api_add_task():
 def api_update_task(task_id):
     user = get_current_user()
     data = request.get_json(silent=True) or {}
-    allowed = {"title", "description", "column_id", "priority", "deadline"}
-    fields = {k: v for k, v in data.items() if k in allowed}
-
-    # handle tag_ids separately
-    if "tag_ids" in data:
-        set_task_tags(task_id, data["tag_ids"] or [])
-
-    if fields:
-        ok = update_task(task_id, user["id"], **fields)
-        if not ok:
-            return jsonify({"error": "Not found"}), 404
-
-    task = get_task(task_id, user["id"])
+    try:
+        tag_ids = (data["tag_ids"] or []) if "tag_ids" in data else None
+        task, previous_assignee = update_task(task_id, user["id"], data, tag_ids=tag_ids)
+    except ValueError as error:
+        return task_validation_error(error)
     if not task:
         return jsonify({"error": "Not found"}), 404
+    notify_task_assignee(task, user, previous_assignee)
     return jsonify(task)
 
 
@@ -422,6 +546,28 @@ def api_delete_tag(tag_id):
 
 # ── Sharing API ───────────────────────────────────────────────────────────────
 
+@app.route("/api/boards/<int:board_id>/department", methods=["PUT"])
+@login_required
+def api_update_department(board_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or "lead_id" not in data:
+        return jsonify({"error": "Invalid department"}), 400
+    lead_id, staff_ids = data["lead_id"], data.get("staff_ids")
+    if (
+        not isinstance(staff_ids, list)
+        or any(type(id) is not int or not 0 < id <= 2**63 - 1 for id in staff_ids)
+        or (lead_id is not None and (type(lead_id) is not int or not 0 < lead_id <= 2**63 - 1))
+    ):
+        return jsonify({"error": "Invalid department"}), 400
+    try:
+        saved = update_department(board_id, session["user_id"], lead_id, set(staff_ids))
+    except InvalidDepartment as error:
+        return jsonify({"error": "Выберите участников этой доски" if session.get("lang", "ru") == "ru" else str(error)}), 400
+    if not saved:
+        return jsonify({"error": "Forbidden"}), 403
+    return jsonify({"ok": True})
+
+
 @app.route("/api/boards/<int:board_id>/share", methods=["POST"])
 @login_required
 def api_toggle_share(board_id):
@@ -447,10 +593,12 @@ def shared_board(token):
     columns = get_columns(board_data["id"])
     columns_data = []
     for col in columns:
-        columns_data.append({
-            **col,
-            "tasks": get_tasks_by_column(board_data["id"], col["id"]),
-        })
+        tasks = get_tasks_by_column(board_data["id"], col["id"])
+        for task in tasks:
+            task.pop("assignee_id", None)
+            task.pop("assigned_by_id", None)
+            task.pop("sender_name", None)
+        columns_data.append({**col, "tasks": tasks})
     tags = get_tags(board_data["user_id"])
     stats = get_board_stats(board_data["id"])
     return render_template(

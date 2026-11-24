@@ -10,6 +10,7 @@ import re
 import sys
 from collections import defaultdict
 from datetime import datetime
+from html import escape
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 PRIO_EMOJI = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 
 # track already notified task deadlines to avoid duplicate alerts
-_notified_deadlines: set[int] = set()
+_notified_deadlines: set[tuple[int, int, str]] = set()
 
 
 def _fmt_dl(iso: str | None) -> str:
@@ -43,17 +44,17 @@ async def send_deadline_reminders(bot: Bot):
         # group by user
         by_user: dict[int, list] = defaultdict(list)
         for t in tasks:
-            if t["id"] not in _notified_deadlines and t["telegram_id"]:
+            if t["telegram_id"] and (t["id"], t["telegram_id"], t["deadline"]) not in _notified_deadlines:
                 by_user[t["telegram_id"]].append(t)
 
         for tg_id, user_tasks in by_user.items():
             lines = ["⏰ <b>Напоминание о дедлайнах:</b>\n"]
             for t in user_tasks:
                 prio = PRIO_EMOJI.get(t.get("priority", "medium"), "")
-                lines.append(f"{prio} <b>{t['title']}</b>\n   📅 {_fmt_dl(t['deadline'])}")
-                _notified_deadlines.add(t["id"])
+                lines.append(f"{prio} <b>{escape(t['title'])}</b>\n   📅 {_fmt_dl(t['deadline'])}")
             try:
                 await bot.send_message(tg_id, "\n".join(lines), parse_mode="HTML")
+                _notified_deadlines.update((t["id"], tg_id, t["deadline"]) for t in user_tasks)
             except Exception as e:
                 logger.warning(f"Failed to send deadline reminder to {tg_id}: {e}")
     except Exception as e:
@@ -72,6 +73,7 @@ async def send_daily_digest(bot: Bot):
             if t["telegram_id"]:
                 by_user[t["telegram_id"]].append(t)
 
+        bot_username = (os.getenv("BOT_USERNAME") or "taskifyjobs_bot").lstrip("@")
         for tg_id, user_tasks in by_user.items():
             total = len(user_tasks)
             high  = sum(1 for t in user_tasks if t.get("priority") == "high")
@@ -100,9 +102,9 @@ async def send_daily_digest(bot: Bot):
                 for t in top:
                     prio = PRIO_EMOJI.get(t.get("priority", "medium"), "")
                     dl = f" 📅 {_fmt_dl(t['deadline'])}" if t.get("deadline") else ""
-                    lines.append(f"{prio} {t['title']}{dl}")
+                    lines.append(f"{prio} {escape(t['title'])}{dl}")
 
-            lines.append("\nОткрой @taskifyjobs_bot чтобы управлять задачами.")
+            lines.append(f"\nОткрой @{bot_username}, чтобы управлять задачами.")
 
             try:
                 await bot.send_message(tg_id, "\n".join(lines), parse_mode="HTML")

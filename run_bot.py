@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from dotenv import load_dotenv
 
 from database.db import init_db
@@ -13,18 +13,23 @@ from bot.scheduler import setup_scheduler
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN не задан в .env")
+def create_dispatcher() -> Dispatcher:
+    dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
+    dp.message.outer_middleware(start.registration_gate)
+    dp.callback_query.outer_middleware(start.registration_gate)
+    dp.include_router(start.router)
+    dp.include_router(tasks.router)
+    return dp
 
 
 async def main():
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise RuntimeError("BOT_TOKEN не задан в .env")
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     init_db()
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp  = Dispatcher(storage=MemoryStorage())
-    dp.include_router(start.router)
-    dp.include_router(tasks.router)
+    bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = create_dispatcher()
 
     scheduler = setup_scheduler(bot)
     scheduler.start()
