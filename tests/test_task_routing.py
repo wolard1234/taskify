@@ -64,6 +64,12 @@ class TaskRoutingTests(TestCase):
         self.assertEqual(own.status_code, 201)
         self.assertEqual(own.json["assignee_id"], self.users["sender"])
         self.assertEqual(own.json["column_id"], db.get_columns(self.source)[0]["id"])
+        self.assertTrue(own.json["self_assigned"])
+        self.assertFalse(direct.json["self_assigned"])
+        page = self.client.get(f"/?board_id={self.source}").get_data(as_text=True)
+        self.assertIn('<p class="card-sender" hidden>От <strong>@sender</strong></p>', page)
+        self.assertIn('title="Исполнитель: @sender"', page)
+        self.assertIn('aria-label="Исполнитель"><use href="#person-icon"', page)
         self.assertEqual(self.notify.call_count, 1)
 
     def test_department_permissions(self):
@@ -87,6 +93,44 @@ class TaskRoutingTests(TestCase):
             "title": "Guest route", "board_id": self.source, "department_id": self.target,
         }).status_code, 400)
         self.notify.assert_not_called()
+
+    def test_registered_employees_are_assignable_without_board_access(self):
+        employee = self.users["guest"]
+        no_username = db.get_or_create_user(205)["id"]
+        owner = self.users["owner"]
+        sender = self.users["sender"]
+        self.assertNotIn(employee, db.get_departments(owner, sender)[self.target]["staff"])
+        self.assertTrue(db.register_user(employee, self.target, "Иванов Иван"))
+        self.assertTrue(db.register_user(no_username, self.target, "Петров Пётр"))
+
+        departments = db.get_departments(owner, sender)
+        self.assertEqual(departments[self.target]["staff"][employee], "@guest")
+        self.assertEqual(departments[self.target]["staff"][no_username], "Петров Пётр")
+        self.assertNotIn(employee, departments[self.source]["staff"])
+
+        response = self.client.post("/api/tasks", json={
+            "title": "For the new employee", "board_id": self.source,
+            "department_id": self.target, "assignee_id": employee,
+        })
+        self.assertEqual(response.status_code, 201)
+        task = response.json
+        self.assertEqual(task["assignee_id"], employee)
+        self.assertEqual(db.get_task(task["id"], employee)["id"], task["id"])
+        done = db.get_columns(self.target)[-1]["id"]
+        self.assertTrue(db.move_task(task["id"], employee, done))
+
+        self.sign_in("guest")
+        self.assertEqual(self.client.get(f"/api/boards/{self.target}/columns").status_code, 404)
+        self.assertEqual(self.client.patch(f"/api/tasks/{task['id']}", json={"title": "No web access"}).status_code, 404)
+        self.assertEqual(db.get_departments(owner, employee), {})
+
+        self.sign_in("lead")
+        response = self.client.patch(f"/api/tasks/{task['id']}", json={"assignee_id": no_username})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["assignee_id"], no_username)
+        page = self.client.get(f"/?board_id={self.target}").get_data(as_text=True)
+        self.assertIn('title="Исполнитель: Петров Пётр"', page)
+        self.assertIn('<p class="card-sender">От <strong>@lead</strong></p>', page)
 
     def test_removing_lead_disables_route(self):
         self.sign_in("owner")

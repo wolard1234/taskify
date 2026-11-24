@@ -130,8 +130,8 @@ function renderAssignees() {
     : new Set();
   fAssignee.replaceChildren(new Option(department ? T.assignToLead : T.unassigned, ''));
   if (Object.hasOwn(assignees, CURRENT_USER_ID)) fAssignee.add(new Option(T.me, CURRENT_USER_ID));
-  for (const [id, username] of Object.entries(assignees).sort(([, a], [, b]) => a.localeCompare(b, LANG))) {
-    if (id !== String(CURRENT_USER_ID) && !routed.has(id)) fAssignee.add(new Option(`@${username}`, id));
+  for (const [id, label] of Object.entries(assignees).sort(([, a], [, b]) => a.localeCompare(b, LANG))) {
+    if (id !== String(CURRENT_USER_ID) && !routed.has(id)) fAssignee.add(new Option(label, id));
   }
 }
 
@@ -322,9 +322,9 @@ function buildCardHTML(task) {
         ${tagsHTML}
         <button type="button" class="card-title" aria-haspopup="dialog">${esc(task.title)}</button>
         ${task.description ? `<p class="card-desc">${esc(task.description)}</p>` : ''}
-        ${task.sender_name ? `<p class="card-sender">${esc(T.taskFrom)} <strong>${esc(task.sender_name)}</strong></p>` : ''}
+        ${task.sender_name ? `<p class="card-sender"${task.self_assigned ? ' hidden' : ''}>${esc(T.taskFrom)} <strong>${esc(task.sender_name)}</strong></p>` : ''}
         <div class="card-meta-row">
-          ${assignee ? `<span class="card-assignee">${esc(T.taskTo)} @${esc(assignee)}</span>` : ''}
+          ${assignee ? `<span class="card-assignee" title="${esc(T.taskAssignee)}: ${esc(assignee)}"><svg width="13" height="13" role="img" aria-label="${esc(T.taskAssignee)}"><use href="#person-icon"/></svg><span>${esc(assignee)}</span></span>` : ''}
           ${dl ? `<span class="card-deadline${overdue}"><svg width="11" height="11" fill="none" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>${esc(dlDisplay)}</span>` : ''}
           <span class="prio-badge prio-badge-${esc(prio)}">${esc(prioLabel)}</span>
         </div>
@@ -1046,9 +1046,8 @@ if (typeof IS_OWNER !== 'undefined' && IS_OWNER && !READONLY) {
     row.dataset.userId = member.user_id;
     row.innerHTML = `<span class="member-name">@${esc(member.username || 'user')}</span><button class="btn-ghost btn-sm member-remove-btn" data-user-id="${member.user_id}">${LANG === 'ru' ? 'Удалить' : 'Remove'}</button>`;
     membersList.appendChild(row);
-    const usernameLabel = member.username || `#${member.user_id}`;
-    ASSIGNEES[member.user_id] = usernameLabel;
-    const label = `@${usernameLabel}`;
+    const label = `@${member.username}`;
+    ASSIGNEES[member.user_id] = label;
     departmentLead.add(new Option(label, member.user_id));
     departmentStaff.insertAdjacentHTML('beforeend', `<label class="department-staff-item"><input type="checkbox" name="staff_ids" value="${member.user_id}"/><span>${esc(label)}</span></label>`);
     input.value = '';
@@ -1062,27 +1061,7 @@ if (typeof IS_OWNER !== 'undefined' && IS_OWNER && !READONLY) {
     const userId = btn.dataset.userId;
     const res = await fetch(`/api/boards/${ACTIVE_BOARD_ID}/members/${userId}`, { method: 'DELETE' });
     if (!res.ok) return;
-    if (departmentLead.dataset.saved === userId) {
-      location.reload();
-      return;
-    }
-    btn.closest('.member-row').remove();
-    delete ASSIGNEES[userId];
-    delete DEPARTMENTS[ACTIVE_BOARD_ID]?.staff[userId];
-    departmentLead.querySelector(`option[value="${userId}"]`)?.remove();
-    departmentStaff.querySelector(`input[value="${userId}"]`)?.closest('label').remove();
-    $$(`.card[data-assignee-id="${userId}"]`).forEach(card => {
-      card.dataset.assigneeId = '';
-      card.querySelector('.card-assignee')?.remove();
-    });
-    if (!membersList.querySelector('.member-row')) {
-      const empty = document.createElement('p');
-      empty.className = 'share-empty';
-      empty.id = 'members-empty';
-      empty.textContent = LANG === 'ru' ? 'Нет участников' : 'No members yet';
-      membersList.appendChild(empty);
-    }
-    showToast(LANG === 'ru' ? 'Участник удалён' : 'Member removed', 'success');
+    location.reload();
   });
 
   $('#department-form').addEventListener('submit', async event => {

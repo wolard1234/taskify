@@ -10,7 +10,7 @@ from aiogram.types import (
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from bot.handlers.start import back_to_menu_kb
+from bot.navigation import back_to_menu_kb, respond
 from database.db import (
     get_or_create_user, get_or_create_default_board,
     get_all_tasks_for_user,
@@ -22,6 +22,7 @@ router = Router()
 
 PRIO_LABELS = {"low": "🟢 Низкий", "medium": "🟡 Средний", "high": "🔴 Высокий"}
 PRIO_ORDER  = ["low", "medium", "high"]
+TAG_PROMPT = "🏷 Выбери теги (можно несколько):"
 
 
 def _parse_deadline(text: str | None) -> str | None:
@@ -93,21 +94,15 @@ def tags_kb(user_id: int, selected_ids: list[int] = None) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def task_actions_kb(task_id: int, current_col_key: str, can_delete: bool) -> InlineKeyboardMarkup:
-    """Buttons: move to doing / done / delete, depending on current column key."""
-    rows = []
-    if current_col_key != "in_progress":
-        rows.append(InlineKeyboardButton(text="⚙️ В процессе", callback_data=f"task:doing:{task_id}"))
-    if current_col_key != "done":
-        rows.append(InlineKeyboardButton(text="✅ Готово",     callback_data=f"task:done:{task_id}"))
-    kb = []
-    if rows:
-        kb.append(rows)
+def task_actions_kb(task_id: int, next_columns: list[dict], can_delete: bool) -> InlineKeyboardMarkup:
+    kb = [[InlineKeyboardButton(text=column["name"], callback_data=f"task:move:{task_id}:{column['id']}")]
+          for column in next_columns]
     footer = []
     if can_delete:
         footer.append(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"task:delete:{task_id}"))
     footer.append(InlineKeyboardButton(text="◀️ Назад", callback_data="menu:list"))
     kb.append(footer)
+    kb.extend(back_to_menu_kb().inline_keyboard)
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -130,7 +125,10 @@ def _fmt_full(t: dict) -> str:
 
 
 def active_tasks(user_id: int) -> list[dict]:
-    tasks = (task for task in get_all_tasks_for_user(user_id) if task["col_key"] != "done")
+    tasks = (
+        task for task in get_all_tasks_for_user(user_id)
+        if task["assignee_id"] == user_id and task["col_key"] != "done"
+    )
     return sorted(tasks, key=lambda task: {"todo": 0, "in_progress": 1}.get(task["col_key"], 2))
 
 
@@ -226,7 +224,8 @@ async def cb_menu_add(call: CallbackQuery, state: FSMContext):
         board = get_or_create_default_board(user["id"])
         await state.update_data(board_id=board["id"], board_name=board["name"])
         await state.set_state(AddTask.waiting_title)
-        await call.message.edit_text(
+        await respond(
+            call,
             f"📋 Доска: <b>{board['name']}</b>\n\n✏️ Введи название задачи:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -237,7 +236,8 @@ async def cb_menu_add(call: CallbackQuery, state: FSMContext):
         # single board — skip selection
         await state.update_data(board_id=boards[0]["id"], board_name=boards[0]["name"])
         await state.set_state(AddTask.waiting_title)
-        await call.message.edit_text(
+        await respond(
+            call,
             f"📋 Доска: <b>{boards[0]['name']}</b>\n\n✏️ Введи название задачи:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -251,7 +251,8 @@ async def cb_menu_add(call: CallbackQuery, state: FSMContext):
             callback_data=f"addboard:{b['id']}"
         )] for b in boards]
         kb_rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="add:cancel")])
-        await call.message.edit_text(
+        await respond(
+            call,
             "✏️ <b>Новая задача</b>\n\nВыбери доску:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
@@ -265,12 +266,10 @@ async def cb_menu_list(call: CallbackQuery):
     tasks = active_tasks(user["id"])
 
     if not tasks:
-        await call.message.edit_text(
-            "Нет активных задач. Добавь первую!",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="➕ Добавить задачу", callback_data="menu:add")],
-                [InlineKeyboardButton(text="◀️ Меню",           callback_data="menu:main")],
-            ]),
+        await respond(
+            call,
+            "Тебе не назначено активных задач.",
+            reply_markup=back_to_menu_kb(),
         )
         await call.answer()
         return
@@ -281,7 +280,8 @@ async def cb_menu_list(call: CallbackQuery):
     )] for t in tasks[:8]]
     kb_rows.append([InlineKeyboardButton(text="◀️ Меню", callback_data="menu:main")])
 
-    await call.message.edit_text(
+    await respond(
+        call,
         format_active_tasks(tasks),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
@@ -294,7 +294,8 @@ async def cb_menu_all(call: CallbackQuery):
     user  = get_or_create_user(call.from_user.id, call.from_user.username or "")
     tasks = get_all_tasks_for_user(user["id"])
     if not tasks:
-        await call.message.edit_text(
+        await respond(
+            call,
             "Задач пока нет.",
             reply_markup=back_to_menu_kb(),
         )
@@ -311,7 +312,8 @@ async def cb_menu_all(call: CallbackQuery):
         lines.append(f"\n<b>📋 {escape(bname)}:</b>")
         lines += [_fmt_short(t) for t in btasks]
 
-    await call.message.edit_text(
+    await respond(
+        call,
         "\n".join(lines),
         parse_mode="HTML",
         reply_markup=back_to_menu_kb(),
@@ -323,7 +325,8 @@ async def cb_menu_all(call: CallbackQuery):
 async def cb_menu_stats(call: CallbackQuery):
     user = get_or_create_user(call.from_user.id, call.from_user.username or "")
     s = get_stats(user["id"])
-    await call.message.edit_text(
+    await respond(
+        call,
         "<b>📊 Статистика:</b>\n\n"
         f"К выполнению:  <b>{s['todo']}</b>\n"
         f"В процессе:    <b>{s['in_progress']}</b>\n"
@@ -340,8 +343,8 @@ async def cb_menu_web(call: CallbackQuery):
     web_url = os.getenv("WEB_URL", "http://localhost:5000")
     token   = str(call.from_user.id)
     login_url = f"{web_url}/login?token={token}"
-    # Send as a new message so the link is always delivered
-    await call.message.answer(
+    await respond(
+        call,
         f"🌐 <b>Веб-панель ЦККО</b>\n\n"
         f'<a href="{login_url}">{login_url}</a>\n\n'
         "<i>Ссылка привязана к твоему аккаунту. Не передавай её другим.</i>",
@@ -353,54 +356,32 @@ async def cb_menu_web(call: CallbackQuery):
 
 
 # ── Task view / actions ────────────────────────────────────────────────────────
-@router.callback_query(F.data.startswith("task:view:"))
-async def cb_task_view(call: CallbackQuery):
-    user    = get_or_create_user(call.from_user.id, call.from_user.username or "")
-    task_id = int(call.data.split(":")[2])
-    task    = get_task(task_id, user["id"])
-    if not task:
-        await call.answer("Задача не найдена.", show_alert=True)
+@router.callback_query(F.data.regexp(r"^task:(?:(?:view|doing|done):[0-9]{1,19}|move:[0-9]{1,19}:[0-9]{1,19})$"))
+async def cb_task_view(call: CallbackQuery, user: dict):
+    _, action, *ids = call.data.split(":")
+    task_id, *target = map(int, ids)
+    if task_id > 2**63 - 1 or any(column_id > 2**63 - 1 for column_id in target):
+        await call.answer("Задача недоступна.", show_alert=True)
         return
-    # determine col key
-    cols    = get_columns(task["board_id"])
-    col     = next((c for c in cols if c["id"] == task["column_id"]), None)
-    col_key = col["key"] if col and col.get("key") else "todo"
-
-    await call.message.edit_text(
-        _fmt_full(task),
-        parse_mode="HTML",
-        reply_markup=task_actions_kb(task_id, col_key, task["user_id"] == user["id"]),
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("task:doing:"))
-@router.callback_query(F.data.startswith("task:done:"))
-async def cb_task_move(call: CallbackQuery):
-    user = get_or_create_user(call.from_user.id, call.from_user.username or "")
-    _, action, raw_task_id = call.data.split(":")
-    task_id = int(raw_task_id)
+    moved = action == "move" and move_task(task_id, user["id"], target[0])
     task = get_task(task_id, user["id"])
     if not task:
         await call.answer("Задача не найдена.", show_alert=True)
         return
     columns = get_columns(task["board_id"])
-    if not columns:
-        await call.answer("Столбцы задачи недоступны.", show_alert=True)
-        return
-    key = "done" if action == "done" else "in_progress"
-    fallback = columns[-1] if action == "done" else columns[min(1, len(columns) - 1)]
-    column = next((column for column in columns if column["key"] == key), fallback)
-    if not move_task(task_id, user["id"], column["id"]):
-        await call.answer("Задача больше недоступна.", show_alert=True)
-        return
-    task["col_name"] = column["name"]
-    await call.answer(f"Задача перемещена в «{column['name']}»")
-    await call.message.edit_text(
+    next_index = next((i + 1 for i, column in enumerate(columns) if column["id"] == task["column_id"]), 0)
+    feedback = None
+    if moved and task["col_name"]:
+        feedback = f"Задача перемещена в «{task['col_name']}»"
+    elif action != "view":
+        feedback = "Этапы обновлены. Выбери доступный столбец."
+    await respond(
+        call,
         _fmt_full(task),
         parse_mode="HTML",
-        reply_markup=task_actions_kb(task_id, key, task["user_id"] == user["id"]),
+        reply_markup=task_actions_kb(task_id, columns[next_index:], task["user_id"] == user["id"]),
     )
+    await call.answer(feedback)
 
 
 @router.callback_query(F.data.startswith("task:delete:"))
@@ -409,7 +390,8 @@ async def cb_task_delete(call: CallbackQuery):
     task_id = int(call.data.split(":")[2])
     ok = delete_task(task_id, user["id"])
     if ok:
-        await call.message.edit_text(
+        await respond(
+            call,
             f"🗑 Задача <code>#{task_id}</code> удалена.",
             parse_mode="HTML",
             reply_markup=back_to_menu_kb(),
@@ -424,7 +406,7 @@ async def cb_task_delete(call: CallbackQuery):
 @router.callback_query(F.data == "add:cancel")
 async def cb_add_cancel(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("Добавление отменено.", reply_markup=back_to_menu_kb())
+    await respond(call, "Добавление отменено.", reply_markup=back_to_menu_kb())
     await call.answer()
 
 
@@ -439,7 +421,8 @@ async def fsm_got_board(call: CallbackQuery, state: FSMContext):
         return
     await state.update_data(board_id=board["id"], board_name=board["name"])
     await state.set_state(AddTask.waiting_title)
-    await call.message.edit_text(
+    await respond(
+        call,
         f"📋 Доска: <b>{board['name']}</b>\n\n✏️ Введи название задачи:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -469,12 +452,13 @@ async def fsm_got_priority(call: CallbackQuery, state: FSMContext):
     prio = call.data.split(":")[1]
     if prio == "cancel":
         await state.clear()
-        await call.message.edit_text("Добавление отменено.", reply_markup=back_to_menu_kb())
+        await respond(call, "Добавление отменено.", reply_markup=back_to_menu_kb())
         await call.answer()
         return
     await state.update_data(priority=prio)
     await state.set_state(AddTask.waiting_deadline)
-    await call.message.edit_text(
+    await respond(
+        call,
         f"Приоритет: {PRIO_LABELS.get(prio, prio)}\n\n"
         "Введи дедлайн в формате <code>ДД-ММ-ГГГГ</code> или <code>ДД-ММ-ГГГГ ЧЧ:ММ</code>\n"
         "или нажми «Пропустить»:",
@@ -491,21 +475,18 @@ async def fsm_deadline_skip(call: CallbackQuery, state: FSMContext):
     all_tags = get_tags(user["id"])
     if not all_tags:
         # no tags exist, skip tag step entirely
-        await _finish_add(call.message, state, deadline=None, tag_ids=[], edit=True)
+        await _finish_add(call, state, deadline=None, tag_ids=[])
     else:
         await state.set_state(AddTask.waiting_tags)
         await state.update_data(selected_tag_ids=[])
-        await call.message.edit_text(
-            "🏷 Выбери теги (можно несколько):",
-            reply_markup=tags_kb(user["id"], []),
-        )
+        await respond(call, TAG_PROMPT, reply_markup=tags_kb(user["id"], []))
     await call.answer()
 
 
 @router.callback_query(AddTask.waiting_deadline, F.data == "dl:cancel")
 async def fsm_deadline_cancel(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("Добавление отменено.", reply_markup=back_to_menu_kb())
+    await respond(call, "Добавление отменено.", reply_markup=back_to_menu_kb())
     await call.answer()
 
 
@@ -524,12 +505,12 @@ async def fsm_got_deadline(message: Message, state: FSMContext):
     user = get_or_create_user(message.from_user.id, message.from_user.username or "")
     all_tags = get_tags(user["id"])
     if not all_tags:
-        await _finish_add(message, state, deadline=deadline_iso, tag_ids=[], edit=False)
+        await _finish_add(message, state, deadline=deadline_iso, tag_ids=[])
     else:
         await state.set_state(AddTask.waiting_tags)
         await state.update_data(selected_tag_ids=[])
         await message.answer(
-            "🏷 Выбери теги (можно несколько):",
+            TAG_PROMPT,
             reply_markup=tags_kb(user["id"], []),
         )
 
@@ -546,7 +527,7 @@ async def fsm_tag_toggle(call: CallbackQuery, state: FSMContext):
         selected.append(tag_id)
     await state.update_data(selected_tag_ids=selected)
     user = get_or_create_user(call.from_user.id, call.from_user.username or "")
-    await call.message.edit_reply_markup(reply_markup=tags_kb(user["id"], selected))
+    await respond(call, TAG_PROMPT, reply_markup=tags_kb(user["id"], selected))
     await call.answer()
 
 
@@ -555,7 +536,7 @@ async def fsm_tag_done(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     selected = data.get("selected_tag_ids", [])
     deadline = data.get("deadline")
-    await _finish_add(call.message, state, deadline=deadline, tag_ids=selected, edit=True)
+    await _finish_add(call, state, deadline=deadline, tag_ids=selected)
     await call.answer()
 
 
@@ -563,18 +544,18 @@ async def fsm_tag_done(call: CallbackQuery, state: FSMContext):
 async def fsm_tag_skip(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     deadline = data.get("deadline")
-    await _finish_add(call.message, state, deadline=deadline, tag_ids=[], edit=True)
+    await _finish_add(call, state, deadline=deadline, tag_ids=[])
     await call.answer()
 
 
 @router.callback_query(AddTask.waiting_tags, F.data == "tag:cancel")
 async def fsm_tag_cancel(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("Добавление отменено.", reply_markup=back_to_menu_kb())
+    await respond(call, "Добавление отменено.", reply_markup=back_to_menu_kb())
     await call.answer()
 
 
-async def _finish_add(msg, state: FSMContext, deadline, tag_ids: list[int] = None, edit: bool = True):
+async def _finish_add(target: Message | CallbackQuery, state: FSMContext, deadline, tag_ids: list[int]):
     data  = await state.get_data()
     title    = data.get("title", "")
     priority = data.get("priority", "medium")
@@ -582,9 +563,7 @@ async def _finish_add(msg, state: FSMContext, deadline, tag_ids: list[int] = Non
     board_name = data.get("board_name", "")
     await state.clear()
 
-    tg_id  = msg.chat.id
-    username = ""
-    user  = get_or_create_user(tg_id, username)
+    user = get_or_create_user(state.key.chat_id)
 
     # use selected board or fallback to default
     if not board_id:
@@ -596,13 +575,10 @@ async def _finish_add(msg, state: FSMContext, deadline, tag_ids: list[int] = Non
     col   = cols[0] if cols else None
     if not col:
         text = "Нет столбцов в доске. Создайте их в веб-панели."
-        if edit:
-            await msg.edit_text(text, reply_markup=back_to_menu_kb())
-        else:
-            await msg.answer(text, reply_markup=back_to_menu_kb())
+        await respond(target, text, reply_markup=back_to_menu_kb())
         return
 
-    task = add_task(user["id"], board_id, col["id"], title, priority=priority, deadline=deadline, tag_ids=tag_ids or [])
+    task = add_task(user["id"], board_id, col["id"], title, priority=priority, deadline=deadline, tag_ids=tag_ids)
 
     dl_txt = f"\n📅 {_fmt_dl_display(deadline)}" if deadline else ""
     tags_txt = ""
@@ -614,10 +590,7 @@ async def _finish_add(msg, state: FSMContext, deadline, tag_ids: list[int] = Non
         f"Приоритет: {PRIO_LABELS.get(priority, '')}{dl_txt}{tags_txt}\n"
         f"📋 Доска: <b>{board_name}</b>"
     )
-    if edit:
-        await msg.edit_text(text, parse_mode="HTML", reply_markup=back_to_menu_kb())
-    else:
-        await msg.answer(text, parse_mode="HTML", reply_markup=back_to_menu_kb())
+    await respond(target, text, parse_mode="HTML", reply_markup=back_to_menu_kb())
 
 
 # ── Legacy text commands (kept as shortcuts) ───────────────────────────────────
@@ -626,7 +599,7 @@ async def cmd_list(message: Message):
     user = get_or_create_user(message.from_user.id, message.from_user.username or "")
     tasks = active_tasks(user["id"])
     if not tasks:
-        await message.answer("Нет активных задач.", reply_markup=back_to_menu_kb())
+        await message.answer("Тебе не назначено активных задач.", reply_markup=back_to_menu_kb())
         return
     await message.answer(format_active_tasks(tasks), parse_mode="HTML", reply_markup=back_to_menu_kb())
 

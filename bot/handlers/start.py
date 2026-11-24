@@ -9,7 +9,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from database.db import get_board_stats, get_or_create_user, get_registration_departments, register_user
+from bot.navigation import back_to_menu_kb, respond
+from database.db import (
+    get_board_stats, get_or_create_user, get_registration_departments,
+    record_telegram_message, register_user,
+)
 
 router = Router()
 ROLES = {"employee": "Сотрудник", "lead": "Лид отдела", "admin": "Администратор"}
@@ -52,12 +56,6 @@ def main_menu_kb(user: dict) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def back_to_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="menu:main")]
-    ])
-
-
 async def send_main_menu(message: Message, user: dict):
     await message.answer(
         f"Привет, <b>{escape(user['full_name'])}</b>! 👋\n\n"
@@ -70,10 +68,13 @@ async def send_main_menu(message: Message, user: dict):
 
 async def registration_gate(handler, event: Message | CallbackQuery, data: dict):
     message = event.message if isinstance(event, CallbackQuery) else event
-    if not isinstance(message, Message) or message.chat.type != ChatType.PRIVATE or not event.from_user:
+    if message is None or message.chat.type != ChatType.PRIVATE or not event.from_user:
         if isinstance(event, CallbackQuery):
             await event.answer("Открой бота в личном чате.", show_alert=True)
         return
+
+    if isinstance(event, Message):
+        record_telegram_message(event.chat.id, event.message_id)
 
     actor = event.from_user
     user = get_or_create_user(actor.id, actor.username or "")
@@ -105,7 +106,8 @@ async def registration_gate(handler, event: Message | CallbackQuery, data: dict)
             await state.set_data({"department_id": department["id"]})
             await state.set_state(Registration.full_name)
             await event.answer()
-            await message.answer(
+            await respond(
+                event,
                 f"Отдел: <b>{escape(department['name'])}</b>\n\n"
                 "Введи фамилию, имя и отчество (если есть) одним сообщением.",
                 parse_mode="HTML",
@@ -118,9 +120,9 @@ async def registration_gate(handler, event: Message | CallbackQuery, data: dict)
 
     await state.clear()
     if not departments:
-        await message.answer("Отделы ещё не настроены. Обратись к администратору и попробуй /start позже.")
+        await respond(event, "Отделы ещё не настроены. Обратись к администратору и попробуй /start позже.")
         return
-    await message.answer("Чтобы начать работу, выбери свой отдел:", reply_markup=InlineKeyboardMarkup(
+    await respond(event, "Чтобы начать работу, выбери свой отдел:", reply_markup=InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=entry["name"], callback_data=f"reg:department:{entry['id']}")]
                          for entry in departments],
     ))
@@ -135,7 +137,7 @@ async def cmd_start(message: Message, state: FSMContext, user: dict):
 @router.callback_query(F.data == "menu:main")
 async def cb_menu_main(call: CallbackQuery, state: FSMContext, user: dict):
     await state.clear()
-    await call.message.edit_text("Выбери действие:", reply_markup=main_menu_kb(user))
+    await respond(call, "Выбери действие:", reply_markup=main_menu_kb(user))
     await call.answer()
 
 
@@ -143,7 +145,8 @@ async def cb_menu_main(call: CallbackQuery, state: FSMContext, user: dict):
 async def cb_menu_profile(call: CallbackQuery, user: dict):
     departments = get_registration_departments()
     department = next((entry["name"] for entry in departments if entry["id"] == user["department_id"]), "Недоступен")
-    await call.message.edit_text(
+    await respond(
+        call,
         f"<b>Мой профиль</b>\n\nФИО: {escape(user['full_name'])}\n"
         f"Отдел: {escape(department)}\nРоль: {ROLES[role_for(user, departments)]}",
         parse_mode="HTML",
@@ -165,7 +168,8 @@ async def cb_menu_departments(call: CallbackQuery, user: dict):
     for entry in departments:
         stats = get_board_stats(entry["id"])
         lines.append(f"<b>{escape(entry['name'])}</b>: активных — {stats['total'] - stats['done']}, готово — {stats['done']}")
-    await call.message.edit_text(
+    await respond(
+        call,
         "\n".join(lines) if lines else "Отделы ещё не настроены.",
         parse_mode="HTML",
         reply_markup=back_to_menu_kb(),

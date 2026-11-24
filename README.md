@@ -57,13 +57,15 @@ All features are free. No premium tiers, no paywalls.
 
 ## Telegram Bot
 
-In a private chat, send `/start`, choose a department, and enter your full name. Commands and menu buttons are available after registration. Existing users complete the profile once without losing tasks or board access. The list includes boards with a configured department lead; selecting a department does not grant board access.
+In a private chat, send `/start`, choose a department, and enter your full name. Commands and menu buttons are available after registration. Existing users complete the profile once without losing tasks or board access. The list includes boards with a configured department lead. Registered users automatically appear as assignees for their department and can manage assigned tasks in the bot. Registration does not grant board access.
 
 Employees use their task menu. Department leads also see their departments’ task counts; bot administrators see counts for all departments. Lead roles come from board settings, not registration. Set `ADMIN_TELEGRAM_IDS` to grant the bot administrator role.
 
+Task cards offer the later columns on the task’s board, in Kanban order. Task cards and notifications link back to the main menu. Buttons on the latest known chat message update it in place; buttons on older messages open a new message without changing the old one.
+
 | Button | Action |
 |---|---|
-| My tasks | View active tasks with quick-action buttons |
+| My tasks | View active tasks explicitly assigned to you, with quick-action buttons |
 | Add | Create a task: pick board -> enter title -> priority -> deadline -> tags |
 | All tasks | View all tasks grouped by board |
 | Stats | Task counts by status |
@@ -84,7 +86,7 @@ A modern kanban board with a dark sidebar and light content area.
 - **Topbar** -- board name, task counts per board, active tag filter chip, Share / +Task / +Column buttons
 - **Board** -- draggable cards across custom columns. Open a card to view and edit its details. Public boards remain read-only.
 - **Column templates** -- choose Agile or a saved personal template for a new board, or apply one from an owned board's column dialog. Applying preserves tasks and keeps unmatched columns that contain tasks.
-- **Department routing** -- owners configure a department lead and staff under Share. For new tasks, choose a department, then a member of that department, or leave the lead selected for delegation. Choose Me to self-assign. Tasks start in To Do automatically. Routing within the same owner’s team does not grant access to the target board.
+- **Department routing** -- owners configure a department lead and can add staff under Share. For new tasks, choose a department and an assignee, or leave the lead selected for delegation. Choose Me to self-assign. Tasks start in To Do automatically. Routing within the same owner’s team does not grant access to the target board.
 - **Multi-tag** -- assign multiple tags per task, shown as colored badges on cards
 - **Tag filter** -- click a tag in the sidebar to show only matching cards; topbar chip shows active filter
 - **Board sharing**:

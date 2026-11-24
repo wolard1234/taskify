@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from bot.navigation import back_to_menu_kb
 from database.db import get_upcoming_deadlines, get_all_active_tasks_for_digest
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ async def send_deadline_reminders(bot: Bot):
                 prio = PRIO_EMOJI.get(t.get("priority", "medium"), "")
                 lines.append(f"{prio} <b>{escape(t['title'])}</b>\n   📅 {_fmt_dl(t['deadline'])}")
             try:
-                await bot.send_message(tg_id, "\n".join(lines), parse_mode="HTML")
+                await bot.send_message(tg_id, "\n".join(lines), parse_mode="HTML", reply_markup=back_to_menu_kb())
                 _notified_deadlines.update((t["id"], tg_id, t["deadline"]) for t in user_tasks)
             except Exception as e:
                 logger.warning(f"Failed to send deadline reminder to {tg_id}: {e}")
@@ -107,7 +108,7 @@ async def send_daily_digest(bot: Bot):
             lines.append(f"\nОткрой @{bot_username}, чтобы управлять задачами.")
 
             try:
-                await bot.send_message(tg_id, "\n".join(lines), parse_mode="HTML")
+                await bot.send_message(tg_id, "\n".join(lines), parse_mode="HTML", reply_markup=back_to_menu_kb())
             except Exception as e:
                 logger.warning(f"Failed to send digest to {tg_id}: {e}")
     except Exception as e:

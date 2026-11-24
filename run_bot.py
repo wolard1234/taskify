@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from database.db import init_db
 from bot.handlers import start, tasks
+from bot.navigation import track_sent_messages
 from bot.scheduler import setup_scheduler
 
 load_dotenv()
@@ -29,6 +30,7 @@ async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     init_db()
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot.session.middleware(track_sent_messages)
     dp = create_dispatcher()
 
     scheduler = setup_scheduler(bot)

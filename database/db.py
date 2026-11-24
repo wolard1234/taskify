@@ -110,6 +110,11 @@ def init_db():
             tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
             PRIMARY KEY (task_id, tag_id)
         );
+
+        CREATE TABLE IF NOT EXISTS telegram_chats (
+            chat_id INTEGER PRIMARY KEY,
+            last_message_id INTEGER NOT NULL
+        );
     """)
     conn.commit()
     conn.close()
@@ -182,6 +187,24 @@ def _migrate():
     # remove old status column if present — NOT removing (safe fallback)
     conn.commit()
     conn.close()
+
+
+def record_telegram_message(chat_id: int, message_id: int):
+    with closing(get_connection()) as conn, conn:
+        conn.execute(
+            """INSERT INTO telegram_chats (chat_id, last_message_id) VALUES (?, ?)
+               ON CONFLICT(chat_id) DO UPDATE SET last_message_id = excluded.last_message_id
+               WHERE excluded.last_message_id > telegram_chats.last_message_id""",
+            (chat_id, message_id),
+        )
+
+
+def is_latest_telegram_message(chat_id: int, message_id: int) -> bool:
+    with closing(get_connection()) as conn:
+        return conn.execute(
+            "SELECT 1 FROM telegram_chats WHERE chat_id = ? AND last_message_id = ?",
+            (chat_id, message_id),
+        ).fetchone() is not None
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -464,6 +487,26 @@ def _board_has_editor(conn, board_id, user_id):
     ).fetchone() is not None
 
 
+BOARD_RECIPIENTS = """
+    SELECT id AS board_id, user_id, 0 AS manual_staff, 0 AS registered_staff FROM boards
+    UNION ALL SELECT board_id, user_id, department_staff, 0 FROM board_members
+    UNION ALL SELECT department_id, id, 0, 1 FROM users WHERE department_id IS NOT NULL AND full_name <> ''
+"""
+
+
+def _assignee_label(row):
+    return f"@{row['username']}" if row["username"] else row["full_name"] or f"#{row['user_id']}"
+
+
+def get_board_assignees(board_id: int) -> dict[int, str]:
+    with closing(get_connection()) as conn:
+        return {row["user_id"]: _assignee_label(row) for row in conn.execute(
+            f"""SELECT DISTINCT r.user_id, u.username, u.full_name
+                FROM ({BOARD_RECIPIENTS}) r JOIN users u ON u.id = r.user_id
+                WHERE r.board_id = ?""", (board_id,),
+        )}
+
+
 def get_departments(owner_id: int, viewer_id: int) -> dict:
     with closing(get_connection()) as conn:
         return _departments(conn, owner_id, viewer_id)
@@ -481,16 +524,18 @@ def _departments(conn, owner_id, viewer_id):
     departments = {}
     team_member = viewer_id == owner_id
     for row in conn.execute(
-        """SELECT b.id AS board_id, b.name, b.department_lead_id AS lead_id, u.id AS user_id, u.username
-           FROM boards b JOIN users u ON u.id = b.department_lead_id OR u.id IN (
-               SELECT m.user_id FROM board_members m WHERE m.board_id = b.id AND m.department_staff = 1
-           )
-           WHERE b.user_id = ? AND b.department_lead_id IS NOT NULL
-           ORDER BY b.position, b.id, u.username, u.id""", (owner_id,),
+        f"""SELECT b.id AS board_id, b.name, b.department_lead_id AS lead_id,
+                   r.user_id, u.username, u.full_name,
+                   (r.user_id = b.department_lead_id OR r.manual_staff) AS configured_staff
+            FROM boards b JOIN ({BOARD_RECIPIENTS}) r ON r.board_id = b.id
+            JOIN users u ON u.id = r.user_id
+            WHERE b.user_id = ? AND b.department_lead_id IS NOT NULL
+              AND (r.user_id = b.department_lead_id OR r.manual_staff OR r.registered_staff)
+            ORDER BY b.position, b.id, u.username, u.id""", (owner_id,),
     ):
         department = departments.setdefault(row["board_id"], {"name": row["name"], "lead_id": row["lead_id"], "staff": {}})
-        department["staff"][row["user_id"]] = row["username"] or f'#{row["user_id"]}'
-        team_member = team_member or row["user_id"] == viewer_id
+        department["staff"][row["user_id"]] = _assignee_label(row)
+        team_member = team_member or (row["user_id"] == viewer_id and row["configured_staff"])
     return departments if team_member else {}
 
 
@@ -758,6 +803,7 @@ def _attach_tags_to_tasks(tasks: list[dict]) -> list[dict]:
 
 TASKS_WITH_SENDER = """
     SELECT t.*,
+           COALESCE(sender.id = t.assignee_id, 0) AS self_assigned,
            CASE WHEN sender.username IS NULL OR sender.username = '' THEN '#' || sender.id
                 ELSE '@' || sender.username END AS sender_name
     FROM tasks t
@@ -830,9 +876,12 @@ def _check_assignee(conn, board_id, assignee_id):
     if assignee_id is not None and (
         type(assignee_id) is not int
         or not 0 < assignee_id <= 2**63 - 1
-        or not _board_has_editor(conn, board_id, assignee_id)
+        or conn.execute(
+            f"SELECT 1 FROM ({BOARD_RECIPIENTS}) WHERE board_id = ? AND user_id = ? LIMIT 1",
+            (board_id, assignee_id),
+        ).fetchone() is None
     ):
-        raise InvalidAssignee("Choose a member of this board")
+        raise InvalidAssignee("Choose an eligible assignee")
 
 
 def add_task(
@@ -940,11 +989,17 @@ def update_task(task_id: int, user_id: int, fields: dict, *, tag_ids=None):
 
 
 def move_task(task_id: int, user_id: int, column_id: int) -> bool:
+    """Advance a task to a later column on the same board."""
     with closing(get_connection()) as conn, conn:
         cur = conn.execute(
             """UPDATE tasks SET column_id = ?
                WHERE id = ? AND COALESCE(assignee_id, user_id) = ?
-                 AND EXISTS (SELECT 1 FROM columns WHERE id = ? AND board_id = tasks.board_id)""",
+                 AND EXISTS (
+                   SELECT 1 FROM columns AS target
+                   LEFT JOIN columns AS source ON source.id = tasks.column_id AND source.board_id = tasks.board_id
+                   WHERE target.id = ? AND target.board_id = tasks.board_id
+                     AND (source.id IS NULL OR (target.position, target.id) > (source.position, source.id))
+                 )""",
             (column_id, task_id, user_id, column_id),
         )
         return cur.rowcount > 0

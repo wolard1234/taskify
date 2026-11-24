@@ -7,6 +7,11 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}"/>
 </head>
 <body class="app-layout">
+<svg width="0" height="0" aria-hidden="true" style="position:absolute">
+  <symbol id="person-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
+  </symbol>
+</svg>
 
 <!-- ── Sidebar ──────────────────────────────────────────────────────────────── -->
 <aside class="sidebar{% if readonly|default(false) %} collapsed{% endif %}" id="sidebar">
@@ -83,7 +88,7 @@
 
   <div class="sidebar-footer">
     <span class="sidebar-user">
-      <svg width="14" height="14" fill="none" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" stroke="currentColor" stroke-width="2"/><path stroke="currentColor" stroke-width="2" d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+      <svg width="14" height="14" aria-hidden="true"><use href="#person-icon"/></svg>
       {{ user.username or 'User' }}
     </span>
     <div class="lang-toggle">
@@ -193,11 +198,16 @@
               <p class="card-desc">{{ task.description }}</p>
               {% endif %}
               {% if task.sender_name %}
-              <p class="card-sender">{{ 'От' if lang == 'ru' else 'From' }} <strong>{{ task.sender_name }}</strong></p>
+              <p class="card-sender"{% if task.self_assigned %} hidden{% endif %}>{{ 'От' if lang == 'ru' else 'From' }} <strong>{{ task.sender_name }}</strong></p>
               {% endif %}
               <div class="card-meta-row">
                 {% if not readonly|default(false) and task.assignee_id %}
-                <span class="card-assignee">{{ 'Кому' if lang == 'ru' else 'To' }} @{{ assignees[task.assignee_id] }}</span>
+                {% set assignee = assignees[task.assignee_id] %}
+                {% set assignee_label = 'Исполнитель' if lang == 'ru' else 'Assignee' %}
+                <span class="card-assignee" title="{{ assignee_label }}: {{ assignee }}">
+                  <svg width="13" height="13" role="img" aria-label="{{ assignee_label }}"><use href="#person-icon"/></svg>
+                  <span>{{ assignee }}</span>
+                </span>
                 {% endif %}
                  {% if task.deadline %}
                  <span class="card-deadline {% if task.deadline < now %}overdue{% endif %}">
@@ -573,10 +583,10 @@
       </div>
       <form class="share-section" id="department-form">
         <p class="share-section-title">{{ 'Отдел и маршрутизация' if lang == 'ru' else 'Department routing' }}</p>
-        <p class="share-section-desc">{{ 'Назначь лида, чтобы доска появилась в списке отделов. Отметь сотрудников, которым можно ставить задачи напрямую.' if lang == 'ru' else 'Choose a lead to make this board a department. Select the staff who can receive tasks directly.' }}</p>
+        <p class="share-section-desc">{{ 'Назначь лида, чтобы доска появилась в списке отделов. Пользователи, выбравшие отдел при регистрации в Telegram, появляются в исполнителях автоматически. Здесь можно указать дополнительных сотрудников из участников доски.' if lang == 'ru' else 'Choose a lead to make this board a department. Users who select it during Telegram registration appear as assignees automatically. You can add other staff from board members here.' }}</p>
         <div class="form-group">
           <label class="form-label" for="department-lead">{{ 'Лид отдела' if lang == 'ru' else 'Department lead' }}</label>
-          <select class="form-input form-select" id="department-lead" name="lead_id" data-saved="{{ active_board.department_lead_id or '' }}">
+          <select class="form-input form-select" id="department-lead" name="lead_id">
             <option value="">{{ 'Не настроен' if lang == 'ru' else 'Not configured' }}</option>
             <option value="{{ user.id }}" {% if active_board.department_lead_id == user.id %}selected{% endif %}>{{ 'Я' if lang == 'ru' else 'Me' }}</option>
             {% for m in members %}
@@ -617,7 +627,7 @@
       newTask: 'Новая задача', taskSaveError: 'Не удалось сохранить задачу',
       noDescription: 'Нет описания', noDeadline: 'Не указан',
       me: 'Я', unassigned: 'Не назначен', assignToLead: 'Назначить лиду отдела',
-      taskFrom: 'От', taskTo: 'Кому',
+      taskFrom: 'От', taskAssignee: 'Исполнитель',
       columnOrderError: 'Не удалось сохранить порядок столбцов',
       columnOrderConflict: 'Доска была изменена. Обновите страницу перед перестановкой.',
       taskRouted: 'Задача отправлена в отдел.', departmentError: 'Не удалось сохранить настройки отдела.',
@@ -635,7 +645,7 @@
       newTask: 'New task', taskSaveError: 'Could not save task',
       noDescription: 'No description', noDeadline: 'Not set',
       me: 'Me', unassigned: 'Unassigned', assignToLead: 'Assign to department lead',
-      taskFrom: 'From', taskTo: 'To',
+      taskFrom: 'From', taskAssignee: 'Assignee',
       columnOrderError: 'Could not save the column order',
       columnOrderConflict: 'The board has changed. Refresh the page before reordering.',
       taskRouted: 'Task sent to the department.', departmentError: 'Could not save department settings.',

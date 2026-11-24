@@ -17,8 +17,9 @@ from flask import (
 from functools import wraps
 from dotenv import load_dotenv
 
+from bot.navigation import back_to_menu_kb
 from database.db import (
-    init_db, get_connection,
+    init_db, get_connection, record_telegram_message,
     get_or_create_user, get_user_by_id, get_all_users,
     # boards
     get_boards, get_board, add_board, update_board, delete_board,
@@ -27,7 +28,7 @@ from database.db import (
     toggle_share_token, get_board_by_share_token,
     get_board_members, add_board_member, remove_board_member,
     get_boards_shared_with_user, user_can_edit_board,
-    get_departments, update_department, InvalidDepartment,
+    get_board_assignees, get_departments, update_department, InvalidDepartment,
     # columns
     get_columns, add_column, update_column, delete_column, reorder_columns,
     get_column_templates, save_column_template, apply_column_template,
@@ -79,18 +80,23 @@ WEB_URL = os.getenv("WEB_URL", "http://localhost:5000").rstrip("/")
 
 
 def notify_telegram(chat_id: int, text: str, reply_markup: dict = None):
-    """Send a Telegram message via Bot API (fire-and-forget)."""
+    """Send a Telegram notification and remember its message ID for navigation."""
     if not BOT_TOKEN or not chat_id or chat_id == 0:
         logging.warning("notify_telegram skipped: no BOT_TOKEN or chat_id=%s", chat_id)
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
+    menu_rows = back_to_menu_kb().model_dump(exclude_none=True)["inline_keyboard"]
+    rows = reply_markup["inline_keyboard"] if reply_markup else []
+    payload = {
+        "chat_id": chat_id, "text": text, "parse_mode": "HTML",
+        "reply_markup": {"inline_keyboard": [*rows, *menu_rows]},
+    }
     try:
         req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-        resp = urlopen(req, timeout=5)
-        logging.info("notify_telegram OK: chat_id=%s status=%s", chat_id, resp.status)
+        with urlopen(req, timeout=5) as resp:
+            message = json.load(resp)["result"]
+            record_telegram_message(chat_id, message["message_id"])
+            logging.info("notify_telegram OK: chat_id=%s status=%s", chat_id, resp.status)
     except Exception as e:
         body = ""
         if hasattr(e, "read"):
@@ -194,12 +200,7 @@ def board():
     tags = get_tags(tag_owner_id)
     stats = get_board_stats(active_board["id"])
     members = get_board_members(active_board["id"])
-    owner = user if is_owner else get_user_by_id(active_board["user_id"])
-    assignees = {owner["id"]: owner["username"] or f"#{owner['id']}"}
-    assignees.update({
-        member["user_id"]: member["username"] or f"#{member['user_id']}"
-        for member in members
-    })
+    assignees = get_board_assignees(active_board["id"])
     departments = get_departments(active_board["user_id"], user["id"])
 
     return render_template(
@@ -437,7 +438,7 @@ def notify_task_assignee(task, actor, previous_assignee=None):
 def task_validation_error(error):
     if session.get("lang", "ru") == "ru":
         if isinstance(error, InvalidAssignee):
-            return jsonify({"error": "Выберите участника этой доски"}), 400
+            return jsonify({"error": "Выберите доступного исполнителя"}), 400
         if isinstance(error, InvalidDepartment):
             return jsonify({"error": "Отдел или исполнитель недоступен. Обновите страницу."}), 400
     return jsonify({"error": str(error)}), 400
